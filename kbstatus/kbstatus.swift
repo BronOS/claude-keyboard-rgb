@@ -51,6 +51,8 @@ struct UserConfig {
     var workingTimeoutMinutes = 20.0      // a silent "working" session is dropped after this
     var pulseFloor = 0.25                 // pulse dims to this fraction of the color
     var attentionStyle = "pulse"          // pulse (0x88 color stream, fast) | blink (alternate color maps, ~3 s period) | static
+    var skipConfigWrite = false           // never send the 0x04 config write (some links drop BT on it; keyboard must already be in effect 21)
+    var echoWaitMs = 0.0                  // >0: after each report wait up to this for the keyboard's echo instead of a fixed gap (BT classic loses fragments otherwise)
     var vendorID = 0x3554, productID = 0xFA07
 
     static func load() -> UserConfig {
@@ -65,6 +67,8 @@ struct UserConfig {
         if let v = j["workingTimeoutMinutes"] as? Double { c.workingTimeoutMinutes = v }
         if let v = j["pulseFloor"] as? Double { c.pulseFloor = v }
         if let v = j["attentionStyle"] as? String { c.attentionStyle = v }
+        if let v = j["skipConfigWrite"] as? Bool { c.skipConfigWrite = v }
+        if let v = j["echoWaitMs"] as? Double { c.echoWaitMs = v }
         if let v = j["productID"] as? Int { c.productID = v }
         return c
     }
@@ -144,12 +148,19 @@ func send(_ f: [UInt8]) -> Bool {
     return true
 }
 func sendAll(_ frames: [[UInt8]], gap: Double = 0.004) -> Bool {
-    for f in frames { if !send(f) { return false }; pump(gap) }
+    for f in frames {
+        let n = rxLog.count
+        if !send(f) { return false }
+        if cfg.echoWaitMs > 0 {
+            var waited = 0.0
+            while rxLog.count == n && waited < cfg.echoWaitMs / 1000 { pump(0.005); waited += 0.005 }
+        } else { pump(gap) }
+    }
     return true
 }
 func attachInputCallback(_ d: IOHIDDevice) {
     IOHIDDeviceRegisterInputReportCallback(d, &rxBuf, rxBuf.count, { _, _, _, _, id, data, len in
-        if id == 0x13 { rxLog.append(Array(UnsafeBufferPointer(start: data, count: len))) }
+        if id == 0x13 { rxLog.append(Array(UnsafeBufferPointer(start: data, count: len))); if rxLog.count > 64 { rxLog.removeFirst(rxLog.count - 64) } }
     }, nil)
     IOHIDDeviceScheduleWithRunLoop(d, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
 }
@@ -234,8 +245,10 @@ func applyBase(_ s: Status) {
     guard device != nil else { return }
     if needFullApply {
         guard let orig = loadConfigHex() ?? readConfigFromKeyboard() else { log("no config fragments; cannot enter per-key mode"); return }
-        if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return }
-        needFullApply = false; lastConfigApply = Date(); log("per-key mode applied")
+        if cfg.skipConfigWrite { log("config write skipped (skipConfigWrite; cached config reports effect \(orig[0][15]))") }
+        else if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return }
+        else { log("per-key mode applied") }
+        needFullApply = false; lastConfigApply = Date()
     }
     if sendAll(perKeyFrames(baseMap(for: s))) { appliedStatus = s; overlayCleared = false; log("base map applied: \(s)") }
     else { appliedStatus = nil }

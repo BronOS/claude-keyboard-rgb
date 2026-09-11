@@ -43,6 +43,7 @@ device is opened.
 | UserPromptSubmit, PostToolUse | `kbstatus working` |
 | Stop | `kbstatus done` |
 | Notification (matcher `permission_prompt`) | `kbstatus attention` |
+| PreToolUse (matcher `AskUserQuestion`) | `kbstatus attention` |
 | SessionEnd | `kbstatus end` |
 
 The client reads `session_id` from the hook JSON on stdin, so several Claude sessions are
@@ -73,9 +74,18 @@ tail -f ~/.cache/kbstatus/daemon.log
   "workingTimeoutMinutes": 20,
   "pulseFloor": 0.25,
   "attentionStyle": "pulse",
-  "productID": 64007
+  "productID": 64007,
+  "skipConfigWrite": false,
+  "echoWaitMs": 0
 }
 ```
+
+Per-machine notes: the same keyboard paired as `AULA-F87Pro 3.0` (PID `0xFA08`, `"productID": 64008`)
+drops off Bluetooth on every config write and loses per-key fragments at the default pacing. On that
+link use `"skipConfigWrite": true` (the keyboard is already in effect 21) and `"echoWaitMs": 60`
+(wait for the keyboard's echo after each report). `kbstatus restore` also does a config write, so
+don't run it there. On a new machine run `kbstatus read-config` once (repeat until all 10 fragments
+arrive) so `config.hex` holds that keyboard's own config.
 
 Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon
