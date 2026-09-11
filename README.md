@@ -11,12 +11,12 @@ orange when it is waiting for a permission decision.
 | `kbstatus/kbstatus.swift` | daemon + hook client (single binary, IOKit HID, no dependencies) |
 | `probe/kbtest.swift` | protocol experiment tool (`read`, `experiment`, `perkey`, `effect`, `stream`) |
 | `probe/hidprobe2.swift` | first minimal probe |
-| `docs/research/` | reverse-engineered F87 protocol notes and reference code |
+| `docs/research/` | protocol findings for the F87 Pro over BLE, with links to the upstream research |
 
 ## Install (any Mac)
 
 ```sh
-git clone <this repo> ~/Projects/claude-keyboard && cd ~/Projects/claude-keyboard
+git clone https://github.com/BronOS/claude-keyboard-rgb.git ~/Projects/claude-keyboard && cd ~/Projects/claude-keyboard
 ./install.sh              # builds, installs ~/.local/bin/kbstatus, adds the hooks
 ./install.sh --uninstall  # removes hooks and binary
 ```
@@ -77,7 +77,7 @@ tail -f ~/.cache/kbstatus/daemon.log
 }
 ```
 
-Key names are the lowercase labels from the key map in `docs/research/PROTOCOL.md`
+Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon
 (`kbstatus stop`) after editing.
 
@@ -92,9 +92,9 @@ Key names are the lowercase labels from the key map in `docs/research/PROTOCOL.m
   `R G B count idx1..idxN`, packed 14 bytes per fragment (subcmd = fragment count, byte 4 =
   `0x1E` on full fragments, `0x10+len` on the last). 13 indicator keys fit in 2 fragments,
   so a frame costs ~100 ms and pulses run at ~10 fps in any color. The idle frame (payload
-  `0x23`) hands the keys back to the per-key map. (The older note in `docs/research/PROTOCOL.md`
-  describing `(brightness, led)` pairs is wrong; the encoding was decoded by the
-  [Aula-F87-Controller](https://github.com/marcoslor/Aula-F87-Controller) project's `stream.py`.)
+  `0x23`) hands the keys back to the per-key map. (The encoding was decoded by the
+  [Aula-F87-Controller](https://github.com/marcoslor/Aula-F87-Controller) project's `stream.py`;
+  an older description as `(brightness, led)` pairs is wrong.)
 - `attentionStyle`: `pulse` (default, red 0x88 stream) | `blink` (alternate color maps, ~3 s) | `static`.
 - **Never switch built-in effects over BLE**: writing effect 2 made the keyboard drop off
   Bluetooth entirely. `kbstatus restore` writes back the exact original config and is the
@@ -103,3 +103,8 @@ Key names are the lowercase labels from the key map in `docs/research/PROTOCOL.m
   `kbstatus read-config` reopens the device between attempts and caches the result in
   `~/.config/kbstatus/config.hex`.
 - On keyboard sleep/reconnect the daemon re-applies per-key mode and the current state.
+
+## Credits
+
+Protocol knowledge comes from [marcoslor/Aula-F87-Controller](https://github.com/marcoslor/Aula-F87-Controller)
+and [NollieL/SignalRgb_CN_Key](https://github.com/NollieL/SignalRgb_CN_Key); see `docs/research/README.md`.
