@@ -1,0 +1,415 @@
+// kbstatus — drive AULA F87 Pro (Bluetooth) RGB as a Claude Code status indicator.
+//
+//   kbstatus working|done|attention|idle|end   (client; session id read from hook JSON on stdin)
+//   kbstatus status | stop | restore | daemon | read-config
+//
+// Design: the keyboard is kept in per-key mode (effect 21). Solid states are per-key color
+// maps; the "working"/"attention" pulse streams brightness (cmd 0x88) onto indicator keys.
+// Nothing is ever saved to flash and built-in effects are never switched (that crashes BLE).
+
+import Foundation
+import IOKit.hid
+
+// MARK: - paths / config -------------------------------------------------------------------
+
+let home = NSHomeDirectory()
+let cfgDir = home + "/.config/kbstatus"
+let cacheDir = home + "/.cache/kbstatus"
+let sockPath = cacheDir + "/sock"
+let logPath = cacheDir + "/daemon.log"
+let configHexPath = cfgDir + "/config.hex"      // cached 10 config fragments read from keyboard
+let userConfigPath = cfgDir + "/config.json"
+try? FileManager.default.createDirectory(atPath: cfgDir, withIntermediateDirectories: true)
+try? FileManager.default.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
+
+func log(_ s: String) {
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(s)\n"
+    if let h = FileHandle(forWritingAtPath: logPath) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); h.closeFile() }
+    else { try? line.write(toFile: logPath, atomically: true, encoding: .utf8) }
+}
+
+typealias RGB = (UInt8, UInt8, UInt8)
+
+// LED index per key (from KB.ini / PROTOCOL.md)
+let keyLED: [String: Int] = [
+    "esc":0,"f1":12,"f2":18,"f3":24,"f4":30,"f5":36,"f6":42,"f7":48,"f8":54,"f9":60,"f10":66,"f11":72,"f12":78,"prtsc":84,"scrlk":90,"pause":96,
+    "`":1,"1":7,"2":13,"3":19,"4":25,"5":31,"6":37,"7":43,"8":49,"9":55,"0":61,"-":67,"=":73,"bksp":79,"ins":85,"home":91,"pgup":97,
+    "tab":2,"q":8,"w":14,"e":20,"r":26,"t":32,"y":38,"u":44,"i":50,"o":56,"p":62,"[":68,"]":74,"\\":80,"del":86,"end":92,"pgdn":98,
+    "caps":3,"a":9,"s":15,"d":21,"f":27,"g":33,"h":39,"j":45,"k":51,"l":57,";":63,"'":69,"enter":81,
+    "lshift":4,"z":10,"x":16,"c":22,"v":28,"b":34,"n":40,"m":46,",":52,".":58,"/":64,"rshift":82,"up":94,
+    "lctrl":5,"lwin":11,"lalt":17,"space":35,"ralt":53,"fn":59,"app":65,"rctrl":83,"left":89,"down":95,"right":101,
+]
+
+struct UserConfig {
+    var indicatorKeys = ["esc","f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12"]
+    var working: RGB = (0, 90, 255)
+    var done: RGB = (0, 255, 40)
+    var attention: RGB = (255, 0, 0)
+    var rest: RGB = (0, 0, 0)             // non-indicator keys while a status is shown (off)
+    var idle: RGB = (0, 0, 0)             // whole board when no session is active (off)
+    var doneHoldSeconds = 90.0            // "done" fades to idle after this
+    var workingTimeoutMinutes = 20.0      // a silent "working" session is dropped after this
+    var pulseFloor = 0.25                 // pulse dims to this fraction of the color
+    var attentionStyle = "pulse"          // pulse (0x88 color stream, fast) | blink (alternate color maps, ~3 s period) | static
+    var vendorID = 0x3554, productID = 0xFA07
+
+    static func load() -> UserConfig {
+        var c = UserConfig()
+        guard let d = FileManager.default.contents(atPath: userConfigPath),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return c }
+        func rgb(_ k: String) -> RGB? { if let a = j[k] as? [Int], a.count == 3 { return (UInt8(a[0]), UInt8(a[1]), UInt8(a[2])) }; return nil }
+        if let k = j["indicatorKeys"] as? [String] { c.indicatorKeys = k.map { $0.lowercased() } }
+        c.working = rgb("working") ?? c.working; c.done = rgb("done") ?? c.done
+        c.attention = rgb("attention") ?? c.attention; c.rest = rgb("rest") ?? c.rest; c.idle = rgb("idle") ?? c.idle
+        if let v = j["doneHoldSeconds"] as? Double { c.doneHoldSeconds = v }
+        if let v = j["workingTimeoutMinutes"] as? Double { c.workingTimeoutMinutes = v }
+        if let v = j["pulseFloor"] as? Double { c.pulseFloor = v }
+        if let v = j["attentionStyle"] as? String { c.attentionStyle = v }
+        if let v = j["productID"] as? Int { c.productID = v }
+        return c
+    }
+}
+let cfg = UserConfig.load()
+let indicatorLEDs: [UInt8] = cfg.indicatorKeys.compactMap { keyLED[$0] }.map { UInt8($0) }
+
+// MARK: - protocol -------------------------------------------------------------------------
+
+func hex(_ b: [UInt8]) -> String { b.map { String(format: "%02x", $0) }.joined(separator: " ") }
+func checksummed(_ f: [UInt8]) -> [UInt8] { var g = f; g[19] = UInt8(g[0..<19].reduce(0) { ($0 + Int($1)) & 0xff }); return g }
+func frame(_ cmd: UInt8, _ sub: UInt8, _ seq: UInt8, _ payload: [UInt8]) -> [UInt8] {
+    var f = [UInt8](repeating: 0, count: 20); f[0] = 0x13; f[1] = cmd; f[2] = sub; f[3] = seq
+    for (i, b) in payload.prefix(15).enumerated() { f[4 + i] = b }
+    return checksummed(f)
+}
+/// 28 fragments: R plane (0-8), G plane (9-17), B plane (18-26), trailer (27). 126 LED slots.
+func perKeyFrames(_ colors: [RGB]) -> [[UInt8]] {
+    let planes: [[UInt8]] = [colors.map { $0.0 }, colors.map { $0.1 }, colors.map { $0.2 }]
+    var out: [[UInt8]] = []
+    for (p, vals) in planes.enumerated() {
+        for k in 0..<9 { out.append(frame(0x02, 0x1C, UInt8(p * 9 + k), [0x0E] + Array(vals[k*14 ..< k*14+14]))) }
+    }
+    out.append(frame(0x02, 0x1C, 27, [0x06, 0x00, 0x00, 0x5A, 0xA5]))
+    return out
+}
+/// cmd 0x88 color stream (decoded from OEM captures by the Aula-F87-Controller project):
+/// data = repeated groups [R, G, B, count, idx1..idxN], packed 14 bytes per fragment,
+/// subcmd = fragment count, byte4 = 0x1E on full fragments, 0x10+len on the last.
+/// An empty list yields the idle frame (payload 0x23), which hands the keys back to the per-key map.
+func overlayFrames(_ leds: [(UInt8, RGB)]) -> [[UInt8]] {
+    var groups: [[UInt8]: [UInt8]] = [:]
+    for (led, c) in leds where c.0 != 0 || c.1 != 0 || c.2 != 0 { groups[[c.0, c.1, c.2], default: []].append(led) }
+    if groups.isEmpty { return [frame(0x88, 0x01, 0, [0x23])] }
+    var data: [UInt8] = []
+    for (rgb, idx) in groups.sorted(by: { $0.value.count > $1.value.count }) { data += rgb + [UInt8(idx.count)] + idx }
+    let chunks = stride(from: 0, to: data.count, by: 14).map { Array(data[$0 ..< min($0 + 14, data.count)]) }.prefix(14)
+    return chunks.enumerated().map { (i, ch) in
+        frame(0x88, UInt8(chunks.count), UInt8(i), [(i == chunks.count - 1) ? 0x10 + UInt8(ch.count) : 0x1E] + ch)
+    }
+}
+func scaled(_ c: RGB, _ level: Double) -> RGB {
+    func f(_ v: UInt8) -> UInt8 { UInt8(max(0, min(255, Int(Double(v) * level + 0.5)))) }
+    return (f(c.0), f(c.1), f(c.2))
+}
+func loadConfigHex() -> [[UInt8]]? {
+    guard let txt = try? String(contentsOfFile: configHexPath, encoding: .utf8) else { return nil }
+    var cfgf = [[UInt8]?](repeating: nil, count: 10)
+    for line in txt.split(separator: "\n") {
+        let b = line.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+        if b.count == 20, b[1] == 0x44, b[3] < 10 { cfgf[Int(b[3])] = b }
+    }
+    return cfgf.compactMap { $0 }.count == 10 ? cfgf.map { $0! } : nil
+}
+/// Config write frames switching to `effect` (21 = per-key). Confirm flag set, apply flag cleared.
+func configFrames(_ original: [[UInt8]], effect: UInt8, colorMode: UInt8) -> [[UInt8]] {
+    original.enumerated().map { (i, f0) in
+        var f = f0; f[1] = 0x04
+        if i == 0 { f[8] = 0x01; f[14] = 0x00; f[15] = effect; f[17] = colorMode }
+        return checksummed(f)
+    }
+}
+
+// MARK: - HID device -----------------------------------------------------------------------
+
+var device: IOHIDDevice? = nil
+var rxLog: [[UInt8]] = []
+var rxBuf = [UInt8](repeating: 0, count: 64)
+var needFullApply = true
+
+func pump(_ s: Double) { CFRunLoopRunInMode(CFRunLoopMode.defaultMode, s, false) }
+@discardableResult
+func send(_ f: [UInt8]) -> Bool {
+    guard let d = device else { return false }
+    let r = f.withUnsafeBufferPointer { IOHIDDeviceSetReport(d, kIOHIDReportTypeOutput, 0x13, $0.baseAddress!, $0.count) }
+    if r != kIOReturnSuccess { log(String(format: "SetReport failed 0x%08x", r)); return false }
+    return true
+}
+func sendAll(_ frames: [[UInt8]], gap: Double = 0.004) -> Bool {
+    for f in frames { if !send(f) { return false }; pump(gap) }
+    return true
+}
+func attachInputCallback(_ d: IOHIDDevice) {
+    IOHIDDeviceRegisterInputReportCallback(d, &rxBuf, rxBuf.count, { _, _, _, _, id, data, len in
+        if id == 0x13 { rxLog.append(Array(UnsafeBufferPointer(start: data, count: len))) }
+    }, nil)
+    IOHIDDeviceScheduleWithRunLoop(d, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+}
+func openDevice(_ d: IOHIDDevice) -> Bool {
+    let r = IOHIDDeviceOpen(d, 0)
+    if r != kIOReturnSuccess { log(String(format: "device open failed 0x%08x (Input Monitoring permission?)", r)); return false }
+    attachInputCallback(d); device = d; needFullApply = true
+    log("device attached"); return true
+}
+func startHIDManager(onArrive: Bool) -> IOHIDManager {
+    let mgr = IOHIDManagerCreate(kCFAllocatorDefault, 0)
+    IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: cfg.vendorID, kIOHIDProductIDKey: cfg.productID] as CFDictionary)
+    if onArrive {
+        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { _, _, _, d in if device == nil { _ = openDevice(d) } }, nil)
+        IOHIDManagerRegisterDeviceRemovalCallback(mgr, { _, _, _, d in
+            if let cur = device, cur == d { IOHIDDeviceUnscheduleFromRunLoop(cur, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue); device = nil; log("device removed") }
+        }, nil)
+    }
+    IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+    _ = IOHIDManagerOpen(mgr, 0)
+    if device == nil, let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>, let d = set.first { _ = openDevice(d) }
+    return mgr
+}
+
+/// Read the 10 config fragments. BLE drops fragments and goes quiet after ~2 reads per connection,
+/// so reopen the device between attempts and accumulate.
+func readConfigFromKeyboard(maxTries: Int = 12) -> [[UInt8]]? {
+    guard let d = device else { return nil }
+    var cfgf = [[UInt8]?](repeating: nil, count: 10)
+    for attempt in 1...maxTries {
+        rxLog.removeAll(); send(frame(0x44, 0x01, 0, [])); pump(1.2)
+        for r in rxLog where r.count >= 20 && r[1] == 0x44 && r[2] == 0x0A && r[3] < 10 { cfgf[Int(r[3])] = r }
+        let missing = (0..<10).filter { cfgf[$0] == nil }
+        print("  read attempt \(attempt): missing \(missing)")
+        if missing.isEmpty { break }
+        IOHIDDeviceUnscheduleFromRunLoop(d, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDDeviceClose(d, 0); pump(0.5); _ = IOHIDDeviceOpen(d, 0); attachInputCallback(d); pump(0.5)
+    }
+    guard cfgf.compactMap({ $0 }).count == 10 else { return nil }
+    let full = cfgf.map { $0! }
+    try? full.map { hex($0) }.joined(separator: "\n").write(toFile: configHexPath, atomically: true, encoding: .utf8)
+    return full
+}
+
+// MARK: - state ----------------------------------------------------------------------------
+
+enum Status: String { case idle, working, done, attention }
+struct SessionState { var status: Status; var since: Date }
+var sessions: [String: SessionState] = [:]
+let stateLock = NSLock()
+var pendingCommands: [String] = []
+var stopRequested = false
+
+func composite() -> Status {
+    let now = Date()
+    for (id, s) in sessions {
+        if s.status == .done, now.timeIntervalSince(s.since) > cfg.doneHoldSeconds { sessions[id] = nil }
+        if s.status == .working, now.timeIntervalSince(s.since) > cfg.workingTimeoutMinutes * 60 { sessions[id] = nil }
+    }
+    let st = sessions.values.map { $0.status }
+    if st.contains(.attention) { return .attention }
+    if st.contains(.working) { return .working }
+    if st.contains(.done) { return .done }
+    return .idle
+}
+func baseMap(for s: Status, indicatorsOff: Bool = false) -> [RGB] {
+    var m = [RGB](repeating: s == .idle ? cfg.idle : cfg.rest, count: 126)
+    let color: RGB? = { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }()
+    if let c = color, !indicatorsOff {
+        let dim = (s == .working || (s == .attention && cfg.attentionStyle == "pulse")) ? scaled(c, cfg.pulseFloor) : c
+        for l in indicatorLEDs { m[Int(l)] = dim }
+    }
+    return m
+}
+var blinkOn = true
+
+var appliedStatus: Status? = nil
+var overlayCleared = false
+var lastConfigApply = Date.distantPast
+
+func applyBase(_ s: Status) {
+    guard device != nil else { return }
+    if needFullApply {
+        guard let orig = loadConfigHex() ?? readConfigFromKeyboard() else { log("no config fragments; cannot enter per-key mode"); return }
+        if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return }
+        needFullApply = false; lastConfigApply = Date(); log("per-key mode applied")
+    }
+    if sendAll(perKeyFrames(baseMap(for: s))) { appliedStatus = s; overlayCleared = false; log("base map applied: \(s)") }
+    else { appliedStatus = nil }
+}
+func tick() {
+    stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
+    for c in cmds { handle(c) }
+    if stopRequested { CFRunLoopStop(CFRunLoopGetMain()); return }
+    guard device != nil else { return }
+    let want = composite()
+    if appliedStatus != want || needFullApply { applyBase(want); if appliedStatus != want { return } }
+    if want == .attention && cfg.attentionStyle != "pulse" {
+        if !overlayCleared { _ = sendAll(overlayFrames([])); overlayCleared = true }
+        if cfg.attentionStyle == "blink" {          // each map write takes ~1.5 s, so this alternates at ~3 s period
+            blinkOn.toggle()
+            _ = sendAll(perKeyFrames(baseMap(for: .attention, indicatorsOff: !blinkOn)))
+        }
+        return
+    }
+    switch want {
+    case .working, .attention:
+        let hz = want == .attention ? 2.0 : 0.8
+        let t = Date().timeIntervalSinceReferenceDate
+        let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * hz * t))
+        let c = scaled(want == .attention ? cfg.attention : cfg.working, level)
+        _ = sendAll(overlayFrames(indicatorLEDs.map { ($0, c) }), gap: 0.002)
+    case .done, .idle:
+        if !overlayCleared { _ = sendAll(overlayFrames([])); overlayCleared = true }
+    }
+}
+func handle(_ line: String) {
+    let parts = line.split(separator: " ").map(String.init)
+    guard parts.count >= 2, parts[0] == "SET" else { return }
+    let sid = parts[1], verb = parts.count > 2 ? parts[2] : ""
+    if verb == "end" { sessions[sid] = nil; log("session \(sid) ended"); return }
+    if let s = Status(rawValue: verb) {
+        if s == .idle { sessions[sid] = nil } else {
+            // keep the original timestamp while status is unchanged (working pings shouldn't reset "since" for timeout... they should refresh it)
+            sessions[sid] = SessionState(status: s, since: Date())
+        }
+        log("session \(sid) -> \(s)")
+    }
+}
+func statusText() -> String {
+    stateLock.lock(); defer { stateLock.unlock() }
+    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\napplied: \(appliedStatus?.rawValue ?? "none")\n"
+    for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
+    return s
+}
+
+// MARK: - unix socket ----------------------------------------------------------------------
+
+func sockaddr(for path: String) -> sockaddr_un {
+    var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+    let bytes = path.utf8CString
+    withUnsafeMutablePointer(to: &addr.sun_path) { $0.withMemoryRebound(to: CChar.self, capacity: 104) { p in for (i, c) in bytes.enumerated() where i < 103 { p[i] = c } } }
+    return addr
+}
+func connectSocket() -> Int32? {
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0); guard fd >= 0 else { return nil }
+    var addr = sockaddr(for: sockPath)
+    let r = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: Darwin.sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+    if r != 0 { close(fd); return nil }
+    return fd
+}
+func serveSocket() {
+    if connectSocket() != nil { fputs("kbstatus daemon already running\n", stderr); exit(0) }
+    unlink(sockPath)
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    var addr = sockaddr(for: sockPath)
+    let r = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: Darwin.sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+    guard r == 0, listen(fd, 16) == 0 else { log("socket bind/listen failed: \(errno)"); exit(1) }
+    Thread {
+        while true {
+            let c = accept(fd, nil, nil); if c < 0 { continue }
+            var buf = [UInt8](repeating: 0, count: 512)
+            let n = read(c, &buf, buf.count)
+            if n > 0, let line = String(bytes: buf[0..<n], encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                if line == "STATUS" { let t = statusText(); _ = t.withCString { write(c, $0, strlen($0)) } }
+                else if line == "STOP" { stateLock.lock(); stopRequested = true; stateLock.unlock() }
+                else { stateLock.lock(); pendingCommands.append(line); stateLock.unlock() }
+            }
+            close(c)
+        }
+    }.start()
+}
+func clientSend(_ line: String, expectReply: Bool = false) -> String? {
+    guard let fd = connectSocket() else { return nil }
+    _ = (line + "\n").withCString { write(fd, $0, strlen($0)) }
+    var out = ""
+    if expectReply { var buf = [UInt8](repeating: 0, count: 4096); let n = read(fd, &buf, buf.count); if n > 0 { out = String(bytes: buf[0..<n], encoding: .utf8) ?? "" } }
+    close(fd); return out
+}
+func spawnDaemon() {
+    let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+    let path = exe.hasPrefix("/") ? exe : (Bundle.main.executablePath ?? exe)
+    var attr: posix_spawnattr_t? = nil; posix_spawnattr_init(&attr)
+    posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+    var fa: posix_spawn_file_actions_t? = nil; posix_spawn_file_actions_init(&fa)
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0)
+    posix_spawn_file_actions_addopen(&fa, 1, logPath, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+    posix_spawn_file_actions_adddup2(&fa, 1, 2)
+    let argv: [UnsafeMutablePointer<CChar>?] = [strdup(path), strdup("daemon"), nil]
+    var pid: pid_t = 0
+    let r = posix_spawn(&pid, path, &fa, &attr, argv, environ)
+    if r != 0 { fputs("failed to spawn daemon: \(r)\n", stderr) }
+}
+
+// MARK: - main -----------------------------------------------------------------------------
+
+let args = Array(CommandLine.arguments.dropFirst())
+let verb = args.first ?? "help"
+
+func sessionID() -> String {
+    if let i = args.firstIndex(of: "--session"), i + 1 < args.count { return args[i + 1] }
+    if isatty(0) == 0 {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let s = j["session_id"] as? String { return String(s.prefix(36)) }
+    }
+    return "manual"
+}
+
+switch verb {
+case "working", "done", "attention", "idle", "end":
+    if FileManager.default.fileExists(atPath: cacheDir + "/paused") { exit(0) }   // `kbstatus pause` / `resume`
+    let line = "SET \(sessionID()) \(verb)"
+    if clientSend(line) == nil {
+        spawnDaemon()
+        var ok = false
+        for _ in 0..<40 { usleep(50_000); if clientSend(line) != nil { ok = true; break } }
+        if !ok { fputs("kbstatus: daemon not reachable\n", stderr); exit(1) }
+    }
+case "pause":
+    _ = clientSend("STOP"); FileManager.default.createFile(atPath: cacheDir + "/paused", contents: nil); print("paused: hooks are no-ops, daemon stopped")
+case "resume":
+    unlink(cacheDir + "/paused"); print("resumed: next hook call starts the daemon")
+case "status":
+    print(clientSend("STATUS", expectReply: true) ?? "daemon not running")
+case "stop":
+    if clientSend("STOP") == nil { print("daemon not running") } else { print("stop requested") }
+case "daemon":
+    serveSocket()
+    log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs)")
+    let mgr = startHIDManager(onArrive: true)
+    let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
+    CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
+    CFRunLoopRun()
+    // stopping: leave the board in idle colors
+    if device != nil { _ = sendAll(overlayFrames([])); _ = sendAll(perKeyFrames(baseMap(for: .idle))) }
+    unlink(sockPath); _ = mgr; log("daemon stopped")
+case "restore":
+    // Write the keyboard's original (cached) config back. Not saved to flash. Stop the daemon first.
+    _ = clientSend("STOP"); usleep(2_500_000)
+    _ = startHIDManager(onArrive: false)
+    guard device != nil else { print("keyboard not found"); exit(1) }
+    guard let orig = loadConfigHex() else { print("no cached config at \(configHexPath)"); exit(1) }
+    var f: [[UInt8]] = orig.map { fr in var g = fr; g[1] = 0x04; return checksummed(g) }
+    f[0][8] = 0x01; f[0][14] = 0x00; f[0] = checksummed(f[0])
+    print(sendAll(f, gap: 0.02) ? "original config written (effect \(orig[0][15]))" : "write failed")
+    pump(0.5)
+case "read-config":
+    _ = startHIDManager(onArrive: false)
+    guard device != nil else { print("keyboard not found"); exit(1) }
+    if let c = readConfigFromKeyboard() { for f in c { print("  ", hex(f)) }; print("saved to \(configHexPath)") } else { print("read failed") }
+default:
+    print("""
+    kbstatus — AULA F87 Pro RGB status indicator for Claude Code hooks
+      kbstatus working|done|attention|idle|end   set this session's state (session id from hook JSON on stdin, or --session ID)
+      kbstatus status                            show daemon state
+      kbstatus stop                              stop daemon (board goes to idle colors)
+      kbstatus pause | resume                    make hook calls no-ops (for experiments) / re-enable
+      kbstatus restore                           stop daemon and write the keyboard's original config back
+      kbstatus read-config                       re-read config fragments from the keyboard
+      kbstatus daemon                            run the daemon in the foreground
+    config: \(userConfigPath)   log: \(logPath)
+    """)
+}
