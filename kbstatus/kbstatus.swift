@@ -52,6 +52,7 @@ struct UserConfig {
     var pulseFloor = 0.25                 // pulse dims to this fraction of the color
     var attentionStyle = "pulse"          // pulse (0x88 color stream, fast) | blink (alternate color maps, ~3 s period) | static
     var skipConfigWrite = false           // never send the 0x04 config write (some links drop BT on it; keyboard must already be in effect 21)
+    var streamFps = 5.0                   // pulse frame rate; lower = less Bluetooth traffic (keystrokes stall when the link is saturated)
     var echoWaitMs = 0.0                  // >0: after each report wait up to this for the keyboard's echo instead of a fixed gap (BT classic loses fragments otherwise)
     var vendorID = 0x3554, productID = 0xFA07
 
@@ -69,6 +70,7 @@ struct UserConfig {
         if let v = j["attentionStyle"] as? String { c.attentionStyle = v }
         if let v = j["skipConfigWrite"] as? Bool { c.skipConfigWrite = v }
         if let v = j["echoWaitMs"] as? Double { c.echoWaitMs = v }
+        if let v = j["streamFps"] as? Double { c.streamFps = max(0.5, v) }
         if let v = j["productID"] as? Int { c.productID = v }
         return c
     }
@@ -236,6 +238,7 @@ func baseMap(for s: Status, indicatorsOff: Bool = false) -> [RGB] {
     return m
 }
 var blinkOn = true
+var lastStreamFrame = 0.0
 
 var appliedStatus: Status? = nil
 var overlayCleared = false
@@ -273,6 +276,8 @@ func tick() {
         let hz = want == .attention ? 2.0 : 0.8
         let t = Date().timeIntervalSinceReferenceDate
         let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * hz * t))
+        if t - lastStreamFrame < 1.0 / cfg.streamFps { return }
+        lastStreamFrame = t
         let c = scaled(want == .attention ? cfg.attention : cfg.working, level)
         _ = sendAll(overlayFrames(indicatorLEDs.map { ($0, c) }), gap: 0.002)
     case .done, .idle:
@@ -409,6 +414,13 @@ case "restore":
     f[0][8] = 0x01; f[0][14] = 0x00; f[0] = checksummed(f[0])
     print(sendAll(f, gap: 0.02) ? "original config written (effect \(orig[0][15]))" : "write failed")
     pump(0.5)
+case "bench":   // bench <fps> <secs> [r g b]  — stream a steady color onto the indicator keys (daemon must be paused)
+    let fps = Double(args.count > 1 ? args[1] : "4") ?? 4, secs = Double(args.count > 2 ? args[2] : "8") ?? 8
+    let c: RGB = args.count > 5 ? (UInt8(args[3]) ?? 0, UInt8(args[4]) ?? 255, UInt8(args[5]) ?? 0) : (0, 255, 0)
+    _ = startHIDManager(onArrive: false); guard device != nil else { print("keyboard not found"); exit(1) }
+    let t0 = Date(); var n = 0
+    while Date().timeIntervalSince(t0) < secs { _ = sendAll(overlayFrames(indicatorLEDs.map { ($0, c) }), gap: 0.002); n += 1; pump(max(0.01, 1.0 / fps - 0.1)) }
+    _ = sendAll(overlayFrames([])); print("sent \(n) frames in \(Int(secs))s at ~\(fps) fps")
 case "read-config":
     _ = startHIDManager(onArrive: false)
     guard device != nil else { print("keyboard not found"); exit(1) }

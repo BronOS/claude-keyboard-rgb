@@ -11,7 +11,7 @@ func withChecksum(_ f:[UInt8])->[UInt8]{ var g=f; g[19]=UInt8(g[0..<19].reduce(0
 
 // ---- device -----------------------------------------------------------------
 let mgr = IOHIDManagerCreate(kCFAllocatorDefault, 0)
-IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: 0x3554, kIOHIDProductIDKey: 0xFA08] as CFDictionary)
+IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: 0x3554] as CFDictionary)   // any AULA link: BLE 0xFA07, BT classic 0xFA08
 IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
 _ = IOHIDManagerOpen(mgr, 0)
 guard let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>, let dev = set.first else { print("no device"); exit(1) }

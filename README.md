@@ -74,11 +74,16 @@ tail -f ~/.cache/kbstatus/daemon.log
   "workingTimeoutMinutes": 20,
   "pulseFloor": 0.25,
   "attentionStyle": "pulse",
+  "streamFps": 5,
   "productID": 64007,
   "skipConfigWrite": false,
   "echoWaitMs": 0
 }
 ```
+
+If typing stalls while a status is shown, the Bluetooth link is saturated: lower `streamFps`
+(2–3 still pulses fine; the keyboard fades between frames). `kbstatus bench <fps> <secs>` streams
+steady green at a given rate for testing (pause the daemon first with `kbstatus pause`).
 
 Per-machine notes: the same keyboard paired as `AULA-F87Pro 3.0` (PID `0xFA08`, `"productID": 64008`)
 drops off Bluetooth on every config write and loses per-key fragments at the default pacing. On that
