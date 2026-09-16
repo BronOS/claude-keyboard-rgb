@@ -275,6 +275,11 @@
   auto-white mode to "none" so the white LED stays off; the daemon keeps sending RGB DDP frames and WLED
   fills W = 0. No code change.
 
+**Network** (the board lives on the IoT VLAN, the Mac on the main network):
+- DDP is unicast UDP to the board's IP on 4048 with no reply, so a stateful main → IoT allow rule
+  is enough; confirm the rule is not TCP-only. mDNS does not cross VLANs: use a DHCP reservation
+  and put the IP (or a router DNS name) in `strip.host`, not the `.local` name.
+
 **First light**:
 - Point `strip.host` at the board, `kbstatus stop`, run `kbstatus strip-test 6`. If dark: run the
   fake receiver on the Mac with `host: 127.0.0.1` to separate daemon from network/board; check WLED's
