@@ -267,9 +267,13 @@
   60 LEDs/m, 1 m, USB 5 V ≥ 2 A supply. A longer or brighter strip needs a dedicated 5 V supply.
 
 **WLED setup** (once, in the browser):
-- Flash from install.wled.me over USB; join Wi-Fi from the captive portal; give it a fixed IP or use
-  its `.local` name. LED settings: 60 LEDs, data pin, brightness limiter for USB power. Sync settings:
-  DDP receiver on (port 4048), realtime timeout ≈ 2000 ms.
+- Flash from install.wled.me over USB (a pre-flashed board such as the QuinLED dig2go skips this); join
+  Wi-Fi from the captive portal; give it a fixed IP or use its `.local` name. LED settings: LED count
+  as cut, data pin, brightness limiter for USB power (dig2go: 3 A max). Sync settings: DDP receiver on
+  (port 4048), realtime timeout ≈ 2000 ms.
+- RGBW strip (SK6812 RGBW, e.g. the DrZzs dig2go RGBW bundle): set LED type to SK6812 RGBW and
+  auto-white mode to "none" so the white LED stays off; the daemon keeps sending RGB DDP frames and WLED
+  fills W = 0. No code change.
 
 **First light**:
 - Point `strip.host` at the board, `kbstatus stop`, run `kbstatus strip-test 6`. If dark: run the
