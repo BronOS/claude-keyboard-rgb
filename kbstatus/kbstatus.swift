@@ -48,6 +48,7 @@ struct UserConfig {
     var indicatorKeys = ["esc","f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12"]
     var solidKeys: [String]? = nil        // keys painted by solid (static) states; default = indicatorKeys; "all" = every key (7 reports per frame instead of 2)
     var attentionKeys: [String]? = nil    // keys painted by the attention state (any style); default = indicatorKeys; "all" = every key
+    var workingKeys: [String]? = nil      // keys painted by the working state (any style); default = indicatorKeys; "all" = every key
     var working: RGB = (0, 90, 255)
     var done: RGB = (0, 255, 40)
     var attention: RGB = (255, 0, 0)
@@ -79,6 +80,8 @@ struct UserConfig {
         if let k = j["solidKeys"] as? String, k.lowercased() == "all" { c.solidKeys = Array(keyLED.keys) }
         if let k = j["attentionKeys"] as? [String] { c.attentionKeys = k.map { $0.lowercased() } }
         if let k = j["attentionKeys"] as? String, k.lowercased() == "all" { c.attentionKeys = Array(keyLED.keys) }
+        if let k = j["workingKeys"] as? [String] { c.workingKeys = k.map { $0.lowercased() } }
+        if let k = j["workingKeys"] as? String, k.lowercased() == "all" { c.workingKeys = Array(keyLED.keys) }
         c.working = rgb("working") ?? c.working; c.done = rgb("done") ?? c.done
         c.attention = rgb("attention") ?? c.attention; c.rest = rgb("rest") ?? c.rest; c.idle = rgb("idle") ?? c.idle
         if let v = j["doneHoldSeconds"] as? Double { c.doneHoldSeconds = v }
@@ -104,6 +107,7 @@ let cfg = UserConfig.load()
 let indicatorLEDs: [UInt8] = cfg.indicatorKeys.compactMap { keyLED[$0] }.map { UInt8($0) }
 let solidLEDs: [UInt8] = (cfg.solidKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
 let attentionLEDs: [UInt8] = (cfg.attentionKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
+let workingLEDs: [UInt8] = (cfg.workingKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
 
 // MARK: - protocol -------------------------------------------------------------------------
 
@@ -347,9 +351,9 @@ func composite() -> Status {
 func solidMap(_ c: RGB) -> [RGB] { [RGB](repeating: c, count: 126) }
 func indicators(_ c: RGB) -> [(UInt8, RGB)] { indicatorLEDs.map { ($0, c) } }
 func solid(_ c: RGB) -> [(UInt8, RGB)] { solidLEDs.map { ($0, c) } }
-/// Keys a state paints: attention has its own set; other solid states use solidKeys; pulses use indicatorKeys.
+/// Keys a state paints: attention and working have their own sets (default: indicatorKeys); done uses solidKeys.
 func leds(for s: Status, _ c: RGB) -> [(UInt8, RGB)] {
-    let set = s == .attention ? attentionLEDs : style(for: s) == "static" ? solidLEDs : indicatorLEDs
+    let set = s == .attention ? attentionLEDs : s == .working ? workingLEDs : solidLEDs
     return set.map { ($0, c) }
 }
 /// Frames per second a state can actually get (a 7-fragment frame takes fragments x gap to send).
@@ -538,7 +542,7 @@ case "stop":
     if clientSend("STOP") == nil { print("daemon not running") } else { print("stop requested") }
 case "daemon":
     serveSocket()
-    log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs); solid states paint \(solidLEDs.count) keys (\(overlayFrames(solid((1, 1, 1))).count) reports per frame); attention paints \(attentionLEDs.count) keys at \(String(format: "%.1f", effectiveFps(for: .attention))) fps, pulse \(String(format: "%.2f", pulseHz(for: .attention))) Hz")
+    log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs); solid states paint \(solidLEDs.count) keys (\(overlayFrames(solid((1, 1, 1))).count) reports per frame); attention paints \(attentionLEDs.count) keys at \(String(format: "%.1f", effectiveFps(for: .attention))) fps, pulse \(String(format: "%.2f", pulseHz(for: .attention))) Hz; working paints \(workingLEDs.count) keys, pulse \(String(format: "%.2f", pulseHz(for: .working))) Hz")
     let mgr = startHIDManager(onArrive: true)
     let typing = startTypingMonitor()
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
