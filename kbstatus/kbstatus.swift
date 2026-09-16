@@ -3,12 +3,13 @@
 //   kbstatus working|done|attention|idle|end   (client; session id read from hook JSON on stdin)
 //   kbstatus status | stop | restore | daemon | read-config
 //
-// Design: the keyboard is kept in per-key mode (effect 21). A background per-key color map is
-// written once per connection; every status (solid or pulsing) is then painted onto the
-// indicator keys with the cmd 0x88 color stream, which costs 2 reports instead of the 28 a
-// per-key map needs. Nothing is written while the user is typing (the keyboard stops scanning
-// keys while it digests a report). Nothing is ever saved to flash and built-in effects are
-// never switched (that crashes BLE).
+// Design: the keyboard is kept in per-key mode (effect 21). A black per-key map is written once
+// per connection (a map transfer freezes key scanning for its whole ~1.4 s, so only after a
+// pause in typing). Every status is painted onto the indicator keys with the cmd 0x88 color
+// stream: 2 reports, never blocks key input; solid states are re-sent every 1.5 s because the
+// keyboard leaves stream mode a few seconds after the last frame. The keyboard sleeps on key
+// inactivity (~1 min) and drops everything until the next key; the next refresh repaints it.
+// Nothing is ever saved to flash and built-in effects are never switched (that crashes BLE).
 
 import Foundation
 import IOKit.hid
@@ -58,7 +59,8 @@ struct UserConfig {
     var skipConfigWrite = false           // never send the 0x04 config write (some links drop BT on it; keyboard must already be in effect 21)
     var streamFps = 5.0                   // pulse frame rate; lower = less Bluetooth traffic (keystrokes stall when the link is saturated)
     var echoWaitMs = 0.0                  // >0: after each report wait up to this for the keyboard's echo instead of a fixed gap (BT classic loses fragments otherwise)
-    var typingHoldSeconds = 1.0           // no LED writes until this long after the last keystroke on the keyboard (0 = off)
+    var typingHoldSeconds = 1.0           // the background map is not written until this long after the last keystroke (0 = off)
+    var overlayRefreshSeconds = 1.5       // solid states are re-sent this often (the keyboard leaves stream mode a few seconds after the last frame)
     var vendorID = 0x3554, productID = 0xFA07
 
     static func load() -> UserConfig {
@@ -77,6 +79,7 @@ struct UserConfig {
         if let v = j["echoWaitMs"] as? Double { c.echoWaitMs = v }
         if let v = j["streamFps"] as? Double { c.streamFps = max(0.5, v) }
         if let v = j["typingHoldSeconds"] as? Double { c.typingHoldSeconds = v }
+        if let v = j["overlayRefreshSeconds"] as? Double { c.overlayRefreshSeconds = max(0.5, v) }
         if let v = j["productID"] as? Int { c.productID = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
         return c
@@ -165,10 +168,13 @@ func send(_ f: [UInt8]) -> Bool {
 /// touches a key (the per-key map only applies on its trailer, so a partial write is harmless).
 /// With `verify` (needs echoWaitMs > 0) each fragment must be echoed back verbatim by the keyboard
 /// within echoWaitMs or it is resent, up to 3 tries; the BT-classic link drops fragments silently.
-func sendAll(_ frames: [[UInt8]], gap: Double = 0.004, abortOnTyping: Bool = false, verify: Bool = false) -> Bool {
-    var resent = 0
-    for f in frames {
-        if abortOnTyping && typingActive() { return false }
+var lastEchoStats = ""                     // "max N ms, R resent" for the last verified write (for the log)
+var unechoed: (frame: [UInt8], at: Double)? = nil   // last fragment that got no echo (link asleep?)
+func sendAll(_ frames: [[UInt8]], gap: Double = 0.004, abortOnTyping: Bool = false, verify: Bool = false, spacing: Double = 0) -> Bool {
+    var resent = 0, maxWait = 0.0
+    for (i, f) in frames.enumerated() {
+        if i > 0, spacing > 0 { pump(spacing) }
+        if abortOnTyping && typingActive() { if i > 0 { log("map write abandoned at fragment \(i): typing") }; return false }
         var tries = 0
         while true {
             let s0 = rxSeq
@@ -181,14 +187,19 @@ func sendAll(_ frames: [[UInt8]], gap: Double = 0.004, abortOnTyping: Bool = fal
                     pump(0.005); waited += 0.005
                     if rxSeq != s0, !verify || rxLast == f { echoed = true; break }
                 }
+                maxWait = max(maxWait, waited)
             } else { pump(gap) }
             tries += 1
             if verify && cfg.echoWaitMs > 0 && !echoed && tries < 2 { resent += 1; continue }
-            if verify && cfg.echoWaitMs > 0 && !echoed { log("fragment not echoed after \(tries) tries: \(hex(f))"); return false }
+            if verify && cfg.echoWaitMs > 0 && !echoed {
+                unechoed = (f, CFAbsoluteTimeGetCurrent())
+                log("fragment not echoed after \(tries) tries: \(hex(f))"); return false
+            }
             break
         }
     }
-    if resent > 0 { log("write: \(resent) fragment(s) resent") }
+    unechoed = nil
+    lastEchoStats = String(format: "echo max %.0f ms, %d resent", maxWait * 1000, resent)
     return true
 }
 
@@ -197,7 +208,7 @@ func attachInputCallback(_ d: IOHIDDevice) {
         if id == 0x13 {
             let b = Array(UnsafeBufferPointer(start: data, count: len))
             rxLog.append(b); if rxLog.count > 64 { rxLog.removeFirst(rxLog.count - 64) }
-            rxLast = Array(b.prefix(20)); rxSeq &+= 1
+            rxLast = Array(b.prefix(20)); rxSeq &+= 1; lastInputAt = CFAbsoluteTimeGetCurrent()
         }
     }, nil)
     IOHIDDeviceScheduleWithRunLoop(d, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
@@ -238,11 +249,24 @@ func startHIDManager(onArrive: Bool) -> IOHIDManager {
 // covered by the same Input Monitoring grant) and hold all writes while keys are active.
 
 var lastKeyActivity = 0.0
-var lastHoldLog = 0.0
+var wasTyping = false
+var lastInputAt = 0.0                      // any report from the keyboard (echo or key): proof the link is awake
+var asleepSince = 0.0
+/// After a fragment gets no echo the keyboard is asleep (it sleeps ~1 min after the last key and
+/// drops every report until the next key). Only the background map is echo-verified, so this just
+/// keeps the map from being retried every 2 s: wait for input from the keyboard, re-probe every 20 s.
+func linkAsleep() -> Bool {
+    guard let u = unechoed else { asleepSince = 0; return false }
+    let t = CFAbsoluteTimeGetCurrent()
+    if lastInputAt > u.at { unechoed = nil; asleepSince = 0; log("keyboard awake again (input after \(String(format: "%.1f", lastInputAt - u.at)) s)"); return false }
+    if asleepSince == 0 { asleepSince = t; log("no echo; keyboard asleep, background map deferred") }
+    if t - asleepSince >= 20 { asleepSince = 0; unechoed = nil; nextMapAttempt = 0; return false }   // probe again
+    return true
+}
 func typingActive() -> Bool {
     guard cfg.typingHoldSeconds > 0 else { return false }
     let t = CFAbsoluteTimeGetCurrent(), active = t - lastKeyActivity < cfg.typingHoldSeconds
-    if active, t - lastHoldLog > 30 { lastHoldLog = t; log("typing: writes held") }
+    if active != wasTyping { wasTyping = active }
     return active
 }
 func startTypingMonitor() -> IOHIDManager {
@@ -251,7 +275,8 @@ func startTypingMonitor() -> IOHIDManager {
                                         kIOHIDDeviceUsagePageKey: 0x01, kIOHIDDeviceUsageKey: 0x06] as CFDictionary)
     IOHIDManagerRegisterInputValueCallback(mgr, { _, _, _, v in
         let page = IOHIDElementGetUsagePage(IOHIDValueGetElement(v))
-        if page == 0x07 || page == 0x0C { lastKeyActivity = CFAbsoluteTimeGetCurrent() }   // keys / media keys; our 0x13 echoes arrive on page 0xFF02
+        lastInputAt = CFAbsoluteTimeGetCurrent()
+        if page == 0x07 || page == 0x0C { lastKeyActivity = lastInputAt }   // keys / media keys; our 0x13 echoes arrive on page 0xFF02
     }, nil)
     IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
     let r = IOHIDManagerOpen(mgr, 0)
@@ -304,24 +329,15 @@ func composite() -> Status {
 }
 func solidMap(_ c: RGB) -> [RGB] { [RGB](repeating: c, count: 126) }
 func indicators(_ c: RGB) -> [(UInt8, RGB)] { indicatorLEDs.map { ($0, c) } }
-func overlayKey(_ leds: [(UInt8, RGB)]) -> [UInt8] { leds.flatMap { [$0.0, $0.1.0, $0.1.1, $0.1.2] } }
-func mapKey(_ m: [RGB]) -> [UInt8] { m.flatMap { [$0.0, $0.1, $0.2] } }
-
 func color(for s: Status) -> RGB? { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }
 func style(for s: Status) -> String { s == .working ? cfg.effectiveWorkingStyle : s == .attention ? cfg.attentionStyle : "static" }
-/// The durable look of a status: a per-key map with the indicator keys in the status color (the
-/// pulse floor for pulsing styles, so the keys stay lit while the stream is paused for typing).
-func map(for s: Status) -> [RGB] {
-    var m = solidMap(s == .idle ? cfg.idle : cfg.rest)
-    if let c = color(for: s) { let k = style(for: s) == "pulse" ? scaled(c, cfg.pulseFloor) : c; for l in indicatorLEDs { m[Int(l)] = k } }
-    return m
-}
 
-var appliedStatus: Status? = nil          // status whose overlay was sent
-var appliedMapKey: [UInt8]? = nil          // per-key map currently on the board (nil = unknown)
+var appliedStatus: Status? = nil          // status currently painted on the indicator keys
+var backgroundApplied = false             // black per-key map written on this connection
 var lastOverlayWrite = 0.0
-var nextMapAttempt = 0.0                   // backoff after a failed/abandoned map write (never retry in a tight loop)
+var nextMapAttempt = 0.0                  // backoff after a failed/abandoned map write (never retry in a tight loop)
 var lastConfigApply = Date.distantPast
+let daemonStart = CFAbsoluteTimeGetCurrent()
 
 func ensurePerKeyMode() -> Bool {
     guard needFullApply else { return true }
@@ -329,11 +345,12 @@ func ensurePerKeyMode() -> Bool {
     if cfg.skipConfigWrite { log("config write skipped (skipConfigWrite; cached config reports effect \(orig[0][15]))") }
     else if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return false }
     else { log("per-key mode applied") }
-    needFullApply = false; lastConfigApply = Date(); appliedMapKey = nil; appliedStatus = nil
+    needFullApply = false; lastConfigApply = Date(); backgroundApplied = false; appliedStatus = nil
     return true
 }
-/// Paint the indicator keys with the 0x88 stream: 2 reports, shows instantly, but the keyboard
-/// drops back to the per-key map a few seconds after the last stream frame.
+/// Paint the indicator keys with the 0x88 stream: 2 reports, instant, never blocks key input.
+/// The keyboard drops out of stream mode a few seconds after the last frame, so solid states
+/// are re-sent every overlayRefreshSeconds.
 func writeOverlay(_ leds: [(UInt8, RGB)]) -> Bool {
     guard sendAll(overlayFrames(leds), gap: 0.002) else { return false }
     lastOverlayWrite = CFAbsoluteTimeGetCurrent(); return true
@@ -342,36 +359,40 @@ func tick() {
     stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
     for c in cmds { handle(c) }
     if stopRequested { CFRunLoopStop(CFRunLoopGetMain()); return }
-    guard device != nil, !typingActive(), ensurePerKeyMode() else { return }
+    guard device != nil, !linkAsleep(), ensurePerKeyMode() else { return }
     let want = composite(), st = style(for: want), t = CFAbsoluteTimeGetCurrent()
-    // 1. instant feedback: one overlay on a status change (pulse/blink styles start streaming below)
-    if appliedStatus != want {
-        if st == "static" { guard writeOverlay(color(for: want).map(indicators) ?? []) else { return } }
-        appliedStatus = want; log("shown: \(want)")
+    // Background map (all keys idle color): written once per connection. A map transfer freezes the
+    // keyboard for its whole duration (~1.4 s), so only after 3 s of quiet, verified fragment by fragment.
+    if !backgroundApplied, !typingActive(), t - max(lastKeyActivity, daemonStart) >= 3, t >= nextMapAttempt, t - lastOverlayWrite >= 0.25 {
+        guard sendAll(perKeyFrames(solidMap(cfg.idle)), abortOnTyping: true, verify: true) else { nextMapAttempt = t + 2.0; return }
+        backgroundApplied = true; appliedStatus = nil; log("background map applied (\(lastEchoStats))")
     }
-    // 2. durable state: the per-key map, verified fragment by fragment, abandoned while keys are active
-    let m = map(for: want), key = mapKey(m)
-    if appliedMapKey != key {
-        if t < nextMapAttempt || t - lastOverlayWrite < 0.25 { return }   // let the keyboard finish the stream frame first
-        guard sendAll(perKeyFrames(m), abortOnTyping: true, verify: true) else { nextMapAttempt = t + 2.0; return }
-        appliedMapKey = key; log("map applied: \(want)")
-    }
-    // 3. animated styles keep streaming (each frame also keeps the stream mode alive)
-    guard let c = color(for: want) else { return }
+    // Indicator keys: overlays for every state.
+    let changed = appliedStatus != want
+    var ok = true
     switch st {
     case "pulse":
-        if t - lastOverlayWrite < 1.0 / cfg.streamFps { return }
+        guard let c = color(for: want) else { break }
+        if !changed && t - lastOverlayWrite < 1.0 / cfg.streamFps { return }
         let hz = want == .attention ? 2.0 : 0.8
         let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * hz * t))
-        _ = writeOverlay(indicators(scaled(c, level)))
+        ok = writeOverlay(indicators(scaled(c, level)))
     case "blink":
-        if t - lastOverlayWrite < 0.5 { return }
-        _ = writeOverlay(t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? indicators(c) : [])
-    default: break
+        guard let c = color(for: want) else { break }
+        if !changed && t - lastOverlayWrite < 0.5 { return }
+        ok = writeOverlay(t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? indicators(c) : [])
+    default:
+        if let c = color(for: want) {
+            if !changed && t - lastOverlayWrite < cfg.overlayRefreshSeconds { return }
+            ok = writeOverlay(indicators(c))
+        } else if changed { ok = writeOverlay([]) }   // idle frame hands the keys back to the (black) map; no refresh needed
     }
+    if ok && changed { appliedStatus = want; log("shown: \(want)") }
+    if !ok { appliedStatus = nil }
 }
 
 func handle(_ line: String) {
+    if line == "REMAP" { backgroundApplied = false; return }   // diagnostics: force the background map again
     let parts = line.split(separator: " ").map(String.init)
     guard parts.count >= 2, parts[0] == "SET" else { return }
     let sid = parts[1], verb = parts.count > 2 ? parts[2] : ""
@@ -386,7 +407,7 @@ func handle(_ line: String) {
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nmap: \(appliedMapKey == nil ? "unknown" : appliedMapKey == mapKey(map(for: composite())) ? "current" : "stale")\nworking style: \(cfg.effectiveWorkingStyle)\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
+    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
     for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
 }
@@ -421,6 +442,7 @@ func serveSocket() {
             if n > 0, let line = String(bytes: buf[0..<n], encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
                 if line == "STATUS" { let t = statusText(); _ = t.withCString { write(c, $0, strlen($0)) } }
                 else if line == "STOP" { stateLock.lock(); stopRequested = true; stateLock.unlock() }
+                else if line == "REMAP" { stateLock.lock(); pendingCommands.append("REMAP"); stateLock.unlock() }
                 else { stateLock.lock(); pendingCommands.append(line); stateLock.unlock() }
             }
             close(c)
@@ -491,7 +513,7 @@ case "daemon":
     CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
     CFRunLoopRun()
     // stopping: leave the board in idle colors
-    if device != nil { _ = sendAll(overlayFrames([])); _ = sendAll(perKeyFrames(map(for: .idle)), verify: true) }
+    if device != nil { _ = sendAll(overlayFrames([])) }   // keys fall back to the black map
     unlink(sockPath); _ = mgr; _ = typing; log("daemon stopped")
 case "restore":
     // Write the keyboard's original (cached) config back. Not saved to flash. Stop the daemon first.

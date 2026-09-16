@@ -68,7 +68,6 @@ tail -f ~/.cache/kbstatus/daemon.log
   "working":   [0, 90, 255],
   "done":      [0, 255, 40],
   "attention": [255, 0, 0],
-  "rest":      [0, 0, 0],
   "idle":      [0, 0, 0],
   "doneHoldSeconds": 90,
   "workingTimeoutMinutes": 20,
@@ -76,6 +75,7 @@ tail -f ~/.cache/kbstatus/daemon.log
   "attentionStyle": "pulse",
   "workingStyle": "pulse",
   "streamFps": 5,
+  "overlayRefreshSeconds": 1.5,
   "typingHoldSeconds": 1,
   "productID": 64007,
   "skipConfigWrite": false,
@@ -83,15 +83,15 @@ tail -f ~/.cache/kbstatus/daemon.log
 }
 ```
 
-The keyboard stops scanning keys while it digests an RGB report, so over Bluetooth every write is
-felt as a typing stall. Three things keep that out of the way:
+Only `0x88` stream frames are used for status colors; they never block key input. The one per-key
+map write (all keys `idle` color, once per connection) freezes key scanning for ~1.4 s, so the
+daemon waits for `typingHoldSeconds` of quiet before sending it (0 disables the wait).
 
-- `typingHoldSeconds`: the daemon watches the keyboard's own key reports and sends nothing until
-  the keys have been quiet for this long (0 disables it).
-- `workingStyle`: `pulse` streams frames continuously; `static` sends one overlay per state change
-  and then nothing. Unset, it defaults to `static` on the BT-classic link (`productID` 64008) and
-  `pulse` elsewhere. `attentionStyle` takes `pulse` | `blink` | `static`.
-- `streamFps` caps the pulse rate when pulsing (2–3 still looks fine; the keyboard fades between frames).
+- `workingStyle` / `attentionStyle`: `pulse` (frames at `streamFps`) | `static` (one overlay,
+  re-sent every `overlayRefreshSeconds`) | `blink` (attention only). `workingStyle` unset defaults
+  to `static` on the BT-classic link (`productID` 64008) and `pulse` elsewhere.
+- `streamFps`: pulse frame rate; 2 typed fine on BT classic and still looks smooth (the keyboard
+  fades between frames).
 
 `kbstatus bench <fps> <secs>` streams steady green at a given rate for testing (pause the daemon
 first with `kbstatus pause`).
@@ -113,16 +113,19 @@ Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED
   (VID 0x3554, PID 0xFA07). Each report costs ~50 ms over BLE.
 - The daemon writes the config once to switch to per-key mode (effect 21) **without saving
   to flash**; the keyboard reverts to its saved effect when it reboots.
-- Each status is shown twice: first as a 2-report `0x88` overlay on the indicator keys (instant),
-  then as a 28-fragment per-key map (~1.5 s) carrying the same colors. The overlay is needed
-  because the keyboard drops out of stream mode a few seconds after the last `0x88` frame and
-  falls back to the per-key map; the map is what makes a solid state stick with no further
-  traffic. Pulsing styles keep streaming frames; their map holds the pulse-floor color so the
-  keys stay lit while the stream is paused for typing. Map writes are never started while keys
-  are active and are abandoned if typing starts (the map only applies on its trailer fragment).
-- The keyboard echoes every fragment back verbatim. With `echoWaitMs` > 0 map writes wait for
-  each echo and resend a fragment that is not echoed (up to 3 tries); the BT-classic link drops
-  fragments silently otherwise.
+- A per-key map transfer (`0x02 0x1C`, 28 fragments) freezes key scanning for its whole
+  duration, however the fragments are paced: keystrokes only arrive after the trailer. So the
+  daemon writes one black map per connection, after a pause in typing, and never uses maps for
+  status colors.
+- `0x88` stream frames never block key input, but the keyboard leaves stream mode a few seconds
+  after the last frame and falls back to the per-key map, so solid states are re-sent every
+  `overlayRefreshSeconds` (2 reports each). Pulses stream at `streamFps`.
+- The keyboard echoes `0x02` map fragments back verbatim (never `0x88` frames). With `echoWaitMs`
+  > 0 the map write waits for each echo and resends an un-echoed fragment once; on failure it
+  backs off 2 s.
+- The keyboard sleeps about a minute after the last keystroke, regardless of host traffic. While
+  asleep it drops every report (nothing is queued, no burst on wake) and the F-row goes dark; the
+  next keystroke wakes it and the next refresh repaints the current status within ~1.5 s.
 - The `0x88` color stream's data is a sequence of groups
   `R G B count idx1..idxN`, packed 14 bytes per fragment (subcmd = fragment count, byte 4 =
   `0x1E` on full fragments, `0x10+len` on the last). 13 indicator keys fit in 2 fragments,
@@ -136,7 +139,7 @@ Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED
 - Reading the config over BLE loses fragments and goes quiet after ~2 reads per connection;
   `kbstatus read-config` reopens the device between attempts and caches the result in
   `~/.config/kbstatus/config.hex`.
-- On keyboard sleep/reconnect the daemon re-applies per-key mode and the current state.
+- On reconnect the daemon re-applies per-key mode, the background map, and the current state.
 
 ## Credits
 
