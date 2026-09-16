@@ -106,12 +106,17 @@ drops off Bluetooth on every config write and loses per-key fragments at the def
 link use `"skipConfigWrite": true` (the keyboard is already in effect 21) and `"echoWaitMs": 60`
 (wait for the keyboard's echo after each report); `workingStyle` defaults to `static` there
 (`pulse` with `"streamFps": 2` also types fine). Its saved per-key map is already dark, so
-`"skipBackgroundMap": true` avoids the one map write that would freeze typing for ~1.4 s. `kbstatus restore` also does a config write, so
+`"skipBackgroundMap": true` avoids the one map write that would freeze typing for ~1.4 s.
+Full-board colors work there too: `"solidKeys": "all"`, `"attentionKeys": "all"`,
+`"streamGapMs": 60`, `"streamFps": 3` gives a whole-board red breathe at 0.6 Hz (~17 reports/s)
+that still types fine. `kbstatus restore` also does a config write, so
 don't run it there. On a new machine run `kbstatus read-config` once (repeat until all 10 fragments
 arrive) so `config.hex` holds that keyboard's own config.
 
 `indicatorKeys` are the keys that pulse; `solidKeys` (default: the same keys, or `"all"`) are the
-keys painted by solid states. One color on all 87 keys is a 7-report frame instead of 2, so a
+keys painted by solid states; `attentionKeys` (same options) are the keys the attention state
+paints in any style. Pulse rates slow down automatically so every cycle gets at least 4 frames
+(a full-board frame takes ~0.7 s to send, so a full-board pulse breathes at ~0.35 Hz). One color on all 87 keys is a 7-report frame instead of 2, so a
 solid full board costs ~5 reports/s at the default refresh; keep pulses on the F-row. The
 BT-classic link loses a fragment now and then, and a full-board frame is more exposed: expect
 a brief blink every half minute or so. `streamGapMs` (pacing between a frame's fragments,
