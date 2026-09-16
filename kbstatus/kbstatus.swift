@@ -60,6 +60,8 @@ struct UserConfig {
     var streamFps = 5.0                   // pulse frame rate; lower = less Bluetooth traffic (keystrokes stall when the link is saturated)
     var echoWaitMs = 0.0                  // >0: after each report wait up to this for the keyboard's echo instead of a fixed gap (BT classic loses fragments otherwise)
     var typingHoldSeconds = 1.0           // the background map is not written until this long after the last keystroke (0 = off)
+    var mapQuietSeconds = 10.0            // ...and never within this many seconds of a keystroke (a map transfer freezes key scanning ~1.4 s)
+    var skipBackgroundMap = false         // the keyboard's own per-key map is already the idle color: never write a map at all
     var overlayRefreshSeconds = 1.5       // solid states are re-sent this often (the keyboard leaves stream mode a few seconds after the last frame)
     var vendorID = 0x3554, productID = 0xFA07
 
@@ -79,6 +81,8 @@ struct UserConfig {
         if let v = j["echoWaitMs"] as? Double { c.echoWaitMs = v }
         if let v = j["streamFps"] as? Double { c.streamFps = max(0.5, v) }
         if let v = j["typingHoldSeconds"] as? Double { c.typingHoldSeconds = v }
+        if let v = j["mapQuietSeconds"] as? Double { c.mapQuietSeconds = v }
+        if let v = j["skipBackgroundMap"] as? Bool { c.skipBackgroundMap = v }
         if let v = j["overlayRefreshSeconds"] as? Double { c.overlayRefreshSeconds = max(0.5, v) }
         if let v = j["productID"] as? Int { c.productID = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
@@ -345,7 +349,7 @@ func ensurePerKeyMode() -> Bool {
     if cfg.skipConfigWrite { log("config write skipped (skipConfigWrite; cached config reports effect \(orig[0][15]))") }
     else if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return false }
     else { log("per-key mode applied") }
-    needFullApply = false; lastConfigApply = Date(); backgroundApplied = false; appliedStatus = nil
+    needFullApply = false; lastConfigApply = Date(); backgroundApplied = cfg.skipBackgroundMap; appliedStatus = nil
     return true
 }
 /// Paint the indicator keys with the 0x88 stream: 2 reports, instant, never blocks key input.
@@ -363,7 +367,7 @@ func tick() {
     let want = composite(), st = style(for: want), t = CFAbsoluteTimeGetCurrent()
     // Background map (all keys idle color): written once per connection. A map transfer freezes the
     // keyboard for its whole duration (~1.4 s), so only after 3 s of quiet, verified fragment by fragment.
-    if !backgroundApplied, !typingActive(), t - max(lastKeyActivity, daemonStart) >= 3, t >= nextMapAttempt, t - lastOverlayWrite >= 0.25 {
+    if !backgroundApplied, !typingActive(), t - max(lastKeyActivity, daemonStart) >= cfg.mapQuietSeconds, t >= nextMapAttempt, t - lastOverlayWrite >= 0.25 {
         guard sendAll(perKeyFrames(solidMap(cfg.idle)), abortOnTyping: true, verify: true) else { nextMapAttempt = t + 2.0; return }
         backgroundApplied = true; appliedStatus = nil; log("background map applied (\(lastEchoStats))")
     }

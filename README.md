@@ -77,6 +77,8 @@ tail -f ~/.cache/kbstatus/daemon.log
   "streamFps": 5,
   "overlayRefreshSeconds": 1.5,
   "typingHoldSeconds": 1,
+  "mapQuietSeconds": 10,
+  "skipBackgroundMap": false,
   "productID": 64007,
   "skipConfigWrite": false,
   "echoWaitMs": 0
@@ -85,7 +87,9 @@ tail -f ~/.cache/kbstatus/daemon.log
 
 Only `0x88` stream frames are used for status colors; they never block key input. The one per-key
 map write (all keys `idle` color, once per connection) freezes key scanning for ~1.4 s, so the
-daemon waits for `typingHoldSeconds` of quiet before sending it (0 disables the wait).
+daemon waits for `mapQuietSeconds` (default 10) without a keystroke before sending it. If the
+keyboard's own saved per-key map is already dark, set `"skipBackgroundMap": true` and no map is
+ever written.
 
 - `workingStyle` / `attentionStyle`: `pulse` (frames at `streamFps`) | `static` (one overlay,
   re-sent every `overlayRefreshSeconds`) | `blink` (attention only). `workingStyle` unset defaults
