@@ -361,8 +361,8 @@ func ensurePerKeyMode() -> Bool {
 /// The keyboard drops out of stream mode a few seconds after the last frame, so solid states
 /// are re-sent every overlayRefreshSeconds.
 func writeOverlay(_ leds: [(UInt8, RGB)]) -> Bool {
-    guard sendAll(overlayFrames(leds), gap: 0.002) else { return false }
-    lastOverlayWrite = CFAbsoluteTimeGetCurrent(); return true
+    lastOverlayWrite = CFAbsoluteTimeGetCurrent()   // interval counts from the frame start: a 7-fragment frame takes ~0.4 s to send
+    return sendAll(overlayFrames(leds), gap: 0.002)
 }
 func tick() {
     stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
