@@ -74,21 +74,33 @@ tail -f ~/.cache/kbstatus/daemon.log
   "workingTimeoutMinutes": 20,
   "pulseFloor": 0.25,
   "attentionStyle": "pulse",
+  "workingStyle": "pulse",
   "streamFps": 5,
+  "typingHoldSeconds": 1,
+  "overlayRefreshSeconds": 15,
   "productID": 64007,
   "skipConfigWrite": false,
   "echoWaitMs": 0
 }
 ```
 
-If typing stalls while a status is shown, the Bluetooth link is saturated: lower `streamFps`
-(2–3 still pulses fine; the keyboard fades between frames). `kbstatus bench <fps> <secs>` streams
-steady green at a given rate for testing (pause the daemon first with `kbstatus pause`).
+The keyboard stops scanning keys while it digests an RGB report, so over Bluetooth every write is
+felt as a typing stall. Three things keep that out of the way:
+
+- `typingHoldSeconds`: the daemon watches the keyboard's own key reports and sends nothing until
+  the keys have been quiet for this long (0 disables it).
+- `workingStyle`: `pulse` streams frames continuously; `static` sends one overlay per state change
+  and then nothing. Unset, it defaults to `static` on the BT-classic link (`productID` 64008) and
+  `pulse` elsewhere. `attentionStyle` takes `pulse` | `blink` | `static`.
+- `streamFps` caps the pulse rate when pulsing (2–3 still looks fine; the keyboard fades between frames).
+
+`kbstatus bench <fps> <secs>` streams steady green at a given rate for testing (pause the daemon
+first with `kbstatus pause`).
 
 Per-machine notes: the same keyboard paired as `AULA-F87Pro 3.0` (PID `0xFA08`, `"productID": 64008`)
 drops off Bluetooth on every config write and loses per-key fragments at the default pacing. On that
 link use `"skipConfigWrite": true` (the keyboard is already in effect 21) and `"echoWaitMs": 60`
-(wait for the keyboard's echo after each report). `kbstatus restore` also does a config write, so
+(wait for the keyboard's echo after each report); `workingStyle` defaults to `static` there. `kbstatus restore` also does a config write, so
 don't run it there. On a new machine run `kbstatus read-config` once (repeat until all 10 fragments
 arrive) so `config.hex` holds that keyboard's own config.
 
@@ -102,15 +114,18 @@ Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED
   (VID 0x3554, PID 0xFA07). Each report costs ~50 ms over BLE.
 - The daemon writes the config once to switch to per-key mode (effect 21) **without saving
   to flash**; the keyboard reverts to its saved effect when it reboots.
-- Solid states are 28-fragment per-key color maps (~1.4 s).
-- Pulses use the `0x88` color stream. Its data is a sequence of groups
+- A background per-key color map (28 fragments, ~1.4 s, `idle`/`rest` color on every key) is
+  written once per connection, and never while keys are active. Every status after that, solid
+  or pulsing, is painted onto the indicator keys with the `0x88` stream, so a state change costs
+  2 reports. Solid overlays are re-sent every `overlayRefreshSeconds` in case the firmware
+  times them out.
+- The `0x88` color stream's data is a sequence of groups
   `R G B count idx1..idxN`, packed 14 bytes per fragment (subcmd = fragment count, byte 4 =
   `0x1E` on full fragments, `0x10+len` on the last). 13 indicator keys fit in 2 fragments,
-  so a frame costs ~100 ms and pulses run at ~10 fps in any color. The idle frame (payload
-  `0x23`) hands the keys back to the per-key map. (The encoding was decoded by the
+  so a frame costs ~100 ms. The idle frame (payload `0x23`) hands the keys back to the per-key map. (The encoding was decoded by the
   [Aula-F87-Controller](https://github.com/marcoslor/Aula-F87-Controller) project's `stream.py`;
   an older description as `(brightness, led)` pairs is wrong.)
-- `attentionStyle`: `pulse` (default, red 0x88 stream) | `blink` (alternate color maps, ~3 s) | `static`.
+- `attentionStyle`: `pulse` (default, red 0x88 stream) | `blink` (overlay on/off, 1 s period) | `static`.
 - **Never switch built-in effects over BLE**: writing effect 2 made the keyboard drop off
   Bluetooth entirely. `kbstatus restore` writes back the exact original config and is the
   only place this is attempted.
