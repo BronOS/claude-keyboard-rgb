@@ -65,6 +65,7 @@ tail -f ~/.cache/kbstatus/daemon.log
 ```json
 {
   "indicatorKeys": ["esc","f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12"],
+  "solidKeys": "all",
   "working":   [0, 90, 255],
   "done":      [0, 255, 40],
   "attention": [255, 0, 0],
@@ -108,6 +109,10 @@ link use `"skipConfigWrite": true` (the keyboard is already in effect 21) and `"
 `"skipBackgroundMap": true` avoids the one map write that would freeze typing for ~1.4 s. `kbstatus restore` also does a config write, so
 don't run it there. On a new machine run `kbstatus read-config` once (repeat until all 10 fragments
 arrive) so `config.hex` holds that keyboard's own config.
+
+`indicatorKeys` are the keys that pulse; `solidKeys` (default: the same keys, or `"all"`) are the
+keys painted by solid states. One color on all 87 keys is a 7-report frame instead of 2, so a
+solid full board costs ~5 reports/s at the default refresh; keep pulses on the F-row.
 
 Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon

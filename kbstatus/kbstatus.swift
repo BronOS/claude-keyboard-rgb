@@ -46,6 +46,7 @@ let keyLED: [String: Int] = [
 
 struct UserConfig {
     var indicatorKeys = ["esc","f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12"]
+    var solidKeys: [String]? = nil        // keys painted by solid (static) states; default = indicatorKeys; "all" = every key (7 reports per frame instead of 2)
     var working: RGB = (0, 90, 255)
     var done: RGB = (0, 255, 40)
     var attention: RGB = (255, 0, 0)
@@ -71,6 +72,8 @@ struct UserConfig {
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return c }
         func rgb(_ k: String) -> RGB? { if let a = j[k] as? [Int], a.count == 3 { return (UInt8(a[0]), UInt8(a[1]), UInt8(a[2])) }; return nil }
         if let k = j["indicatorKeys"] as? [String] { c.indicatorKeys = k.map { $0.lowercased() } }
+        if let k = j["solidKeys"] as? [String] { c.solidKeys = k.map { $0.lowercased() } }
+        if let k = j["solidKeys"] as? String, k.lowercased() == "all" { c.solidKeys = Array(keyLED.keys) }
         c.working = rgb("working") ?? c.working; c.done = rgb("done") ?? c.done
         c.attention = rgb("attention") ?? c.attention; c.rest = rgb("rest") ?? c.rest; c.idle = rgb("idle") ?? c.idle
         if let v = j["doneHoldSeconds"] as? Double { c.doneHoldSeconds = v }
@@ -92,6 +95,7 @@ struct UserConfig {
 }
 let cfg = UserConfig.load()
 let indicatorLEDs: [UInt8] = cfg.indicatorKeys.compactMap { keyLED[$0] }.map { UInt8($0) }
+let solidLEDs: [UInt8] = (cfg.solidKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
 
 // MARK: - protocol -------------------------------------------------------------------------
 
@@ -333,6 +337,7 @@ func composite() -> Status {
 }
 func solidMap(_ c: RGB) -> [RGB] { [RGB](repeating: c, count: 126) }
 func indicators(_ c: RGB) -> [(UInt8, RGB)] { indicatorLEDs.map { ($0, c) } }
+func solid(_ c: RGB) -> [(UInt8, RGB)] { solidLEDs.map { ($0, c) } }
 func color(for s: Status) -> RGB? { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }
 func style(for s: Status) -> String { s == .working ? cfg.effectiveWorkingStyle : s == .attention ? cfg.attentionStyle : "static" }
 
@@ -388,7 +393,7 @@ func tick() {
     default:
         if let c = color(for: want) {
             if !changed && t - lastOverlayWrite < cfg.overlayRefreshSeconds { return }
-            ok = writeOverlay(indicators(c))
+            ok = writeOverlay(solid(c))
         } else if changed { ok = writeOverlay([]) }   // idle frame hands the keys back to the (black) map; no refresh needed
     }
     if ok && changed { appliedStatus = want; log("shown: \(want)") }
@@ -510,7 +515,7 @@ case "stop":
     if clientSend("STOP") == nil { print("daemon not running") } else { print("stop requested") }
 case "daemon":
     serveSocket()
-    log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs)")
+    log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs); solid states paint \(solidLEDs.count) keys (\(overlayFrames(solid((1, 1, 1))).count) reports per frame)")
     let mgr = startHIDManager(onArrive: true)
     let typing = startTypingMonitor()
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
