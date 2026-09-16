@@ -10,6 +10,10 @@
 // keyboard leaves stream mode a few seconds after the last frame. The keyboard sleeps on key
 // inactivity (~1 min) and drops everything until the next key; the next refresh repaints it.
 // Nothing is ever saved to flash and built-in effects are never switched (that crashes BLE).
+//
+// Optional second backend ("builtinBacklight"): the MacBook's own white keyboard backlight via the
+// private CoreBrightness KeyboardBrightnessClient. No color, so states differ by rhythm: working
+// breathes, attention blinks, done is steady bright; idle restores the user's level + auto-brightness.
 
 import Foundation
 import IOKit.hid
@@ -75,6 +79,14 @@ struct UserConfig {
     var badgePollSeconds = 2.0
     var agtermctlPath = "/opt/homebrew/bin/agtermctl"
     var vendorID = 0x3554, productID = 0xFA07
+    var builtinBacklight = false          // also drive the MacBook's built-in keyboard backlight (private CoreBrightness API)
+    var builtinWorkingStyle = "breathe"   // breathe | static | off
+    var builtinAttentionStyle = "blink"   // blink | breathe
+    var builtinBreatheSeconds = 3.0       // breathe period (1.6 s was too subtle; the backlight smooths fast changes)
+    var builtinBlinkHz = 1.0
+    var builtinFps = 30.0
+    var builtinLevel = 1.0                // brightness for done / static working (0..1)
+    var builtinFloor = 0.0                // breathe dims to this (0 = fully off at the trough)
 
     static func load() -> UserConfig {
         var c = UserConfig()
@@ -111,6 +123,14 @@ struct UserConfig {
         if let v = j["badgePollSeconds"] as? Double { c.badgePollSeconds = max(0.5, v) }
         if let v = j["agtermctlPath"] as? String { c.agtermctlPath = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
+        if let v = j["builtinBacklight"] as? Bool { c.builtinBacklight = v }
+        if let v = j["builtinWorkingStyle"] as? String { c.builtinWorkingStyle = v }
+        if let v = j["builtinAttentionStyle"] as? String { c.builtinAttentionStyle = v }
+        if let v = j["builtinBreatheSeconds"] as? Double { c.builtinBreatheSeconds = max(0.5, v) }
+        if let v = j["builtinBlinkHz"] as? Double { c.builtinBlinkHz = max(0.2, v) }
+        if let v = j["builtinFps"] as? Double { c.builtinFps = max(2, min(60, v)) }
+        if let v = j["builtinLevel"] as? Double { c.builtinLevel = max(0, min(1, v)) }
+        if let v = j["builtinFloor"] as? Double { c.builtinFloor = max(0, min(1, v)) }
         return c
     }
     var effectiveWorkingStyle: String { workingStyle ?? (productID == 0xFA08 ? "static" : "pulse") }
@@ -352,7 +372,7 @@ func composite() -> Status {
     let now = Date()
     for (id, s) in sessions {
         if s.status == .done, now.timeIntervalSince(s.since) > cfg.doneHoldSeconds { sessions[id] = nil }
-        if s.status == .done, cfg.doneClearsOnTyping, lastKeyActivity > s.since.timeIntervalSinceReferenceDate + 0.5 { sessions[id] = nil; log("session \(id) done cleared by typing") }
+        if s.status == .done, cfg.doneClearsOnTyping, max(lastKeyActivity, lastBuiltinKeyActivity) > s.since.timeIntervalSinceReferenceDate + 0.5 { sessions[id] = nil; log("session \(id) done cleared by typing") }
         if s.status == .working, now.timeIntervalSince(s.since) > cfg.workingTimeoutMinutes * 60 { sessions[id] = nil }
     }
     let st = sessions.values.map { $0.status }
@@ -379,6 +399,94 @@ func effectiveFps(for s: Status) -> Double {
 func pulseHz(for s: Status) -> Double { min(s == .attention ? 2.0 : 0.8, effectiveFps(for: s) / 4) }
 func color(for s: Status) -> RGB? { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }
 func style(for s: Status) -> String { s == .working ? cfg.effectiveWorkingStyle : s == .attention ? cfg.attentionStyle : "static" }
+
+// MARK: - built-in keyboard backlight ---------------------------------------------------------
+// The MacBook's own backlight through the private CoreBrightness framework (KeyboardBrightnessClient:
+// copyKeyboardBacklightIDs / brightnessForKeyboard: / setBrightness:forKeyboard: / auto-brightness).
+// Private API: everything is looked up at runtime and the backend is simply absent if it is missing.
+// Local calls, so a 30 fps fade costs nothing on the Bluetooth link.
+
+final class Backlight {
+    private let c: NSObject, id: UInt64
+    private let sGet = NSSelectorFromString("brightnessForKeyboard:"), sSet = NSSelectorFromString("setBrightness:forKeyboard:")
+    private let sGetA = NSSelectorFromString("isAutoBrightnessEnabledForKeyboard:"), sSetA = NSSelectorFromString("enableAutoBrightness:forKeyboard:")
+    private typealias GetF = @convention(c) (AnyObject, Selector, UInt64) -> Float
+    private typealias SetF = @convention(c) (AnyObject, Selector, Float, UInt64) -> Bool
+    private typealias GetB = @convention(c) (AnyObject, Selector, UInt64) -> Bool
+    private typealias SetB = @convention(c) (AnyObject, Selector, Bool, UInt64) -> Bool
+    private let getF: GetF, setF: SetF, getB: GetB, setB: SetB
+    private(set) var original: (level: Float, auto: Bool)? = nil   // captured when a state starts; restored on idle / stop
+    private var lastLevel: Float = -1
+
+    init?() {
+        guard dlopen("/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness", RTLD_NOW) != nil,
+              let cls = NSClassFromString("KeyboardBrightnessClient") as? NSObject.Type else { log("built-in backlight: KeyboardBrightnessClient not available"); return nil }
+        let obj = cls.init()
+        let sIDs = NSSelectorFromString("copyKeyboardBacklightIDs")
+        guard [sIDs, sGet, sSet, sGetA, sSetA].allSatisfy({ obj.responds(to: $0) }) else { log("built-in backlight: API shape changed; disabled"); return nil }
+        guard let ids = obj.perform(sIDs)?.takeRetainedValue() as? [NSNumber], let first = ids.first else { log("built-in backlight: no backlit keyboard"); return nil }
+        c = obj; id = first.uint64Value
+        getF = unsafeBitCast(obj.method(for: sGet), to: GetF.self); setF = unsafeBitCast(obj.method(for: sSet), to: SetF.self)
+        getB = unsafeBitCast(obj.method(for: sGetA), to: GetB.self); setB = unsafeBitCast(obj.method(for: sSetA), to: SetB.self)
+    }
+    var level: Float { getF(c, sGet, id) }
+    var auto: Bool { getB(c, sGetA, id) }
+    /// Take over: remember the user's level and auto-brightness (once), then turn auto off so it stops fighting the pulse.
+    func begin() { if original == nil { original = (level, auto); _ = setB(c, sSetA, false, id); lastLevel = -1 } }
+    func set(_ v: Double) {
+        let f = Float(max(0, min(1, v))); if abs(f - lastLevel) < 0.003 { return }
+        lastLevel = f; _ = setF(c, sSet, f, id)
+    }
+    func restore() {
+        guard let o = original else { return }
+        _ = setF(c, sSet, o.level, id); _ = setB(c, sSetA, o.auto, id); original = nil; lastLevel = -1
+    }
+}
+var backlight: Backlight? = nil
+var backlightShown: Status? = .idle          // nothing taken over yet
+var lastBuiltinKeyActivity = 0.0
+
+/// 0..1 breathe with a gamma curve: linear ramps spend most of their time in the bright, indistinguishable half.
+func breathe(_ t: Double, period: Double) -> Double {
+    let x = 0.5 - 0.5 * cos(2 * .pi * t / period)
+    return cfg.builtinFloor + (1 - cfg.builtinFloor) * pow(x, 2.2)
+}
+func backlightTick() {
+    guard let bl = backlight else { return }
+    let want = composite(), t = CFAbsoluteTimeGetCurrent()
+    let off = want == .idle || (want == .working && cfg.builtinWorkingStyle == "off")
+    if off {
+        if backlightShown != want { bl.restore(); backlightShown = want; log("backlight: \(want == .idle ? "restored" : "working (off)")") }
+        return
+    }
+    bl.begin()
+    switch want {
+    case .working:   bl.set(cfg.builtinWorkingStyle == "static" ? cfg.builtinLevel : breathe(t, period: cfg.builtinBreatheSeconds))
+    case .attention: bl.set(cfg.builtinAttentionStyle == "breathe" ? breathe(t, period: 1 / cfg.builtinBlinkHz)
+                            : (t * cfg.builtinBlinkHz).truncatingRemainder(dividingBy: 1) < 0.5 ? 1 : 0)
+    case .done:      bl.set(cfg.builtinLevel)
+    case .idle:      break
+    }
+    if backlightShown != want { backlightShown = want; log("backlight: \(want)") }
+}
+/// Keystrokes on any keyboard other than the AULA board (the internal one reports vendor/product 0 over an
+/// internal FIFO transport, so it cannot be matched by ID) clear the done state.
+func startBuiltinTypingMonitor() -> IOHIDManager {
+    let mgr = IOHIDManagerCreate(kCFAllocatorDefault, 0)
+    IOHIDManagerSetDeviceMatching(mgr, [kIOHIDDeviceUsagePageKey: 0x01, kIOHIDDeviceUsageKey: 0x06] as CFDictionary)
+    IOHIDManagerRegisterInputValueCallback(mgr, { _, _, _, v in
+        let el = IOHIDValueGetElement(v), page = IOHIDElementGetUsagePage(el)
+        guard page == 0x07 || page == 0x0C else { return }
+        if (IOHIDDeviceGetProperty(IOHIDElementGetDevice(el), kIOHIDVendorIDKey as CFString) as? Int) == cfg.vendorID { return }
+        lastBuiltinKeyActivity = CFAbsoluteTimeGetCurrent()
+    }, nil)
+    IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+    let r = IOHIDManagerOpen(mgr, 0)
+    if r != kIOReturnSuccess { log(String(format: "built-in typing monitor open failed 0x%08x", r)) }
+    let n = (IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>)?.count ?? 0
+    log("built-in typing monitor: \(n) key collection(s) (AULA excluded)")
+    return mgr
+}
 
 // MARK: - agterm badges ---------------------------------------------------------------------
 // The number keys mirror agterm's sidebar badges: one red key per session with unseen notifications
@@ -512,7 +620,7 @@ func handle(_ line: String) {
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
+    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\nbuilt-in backlight: \(backlight == nil ? (cfg.builtinBacklight ? "unavailable" : "off") : (backlightShown?.rawValue ?? "none"))\n"
     for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
 }
@@ -614,13 +722,21 @@ case "daemon":
     log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs); solid states paint \(solidLEDs.count) keys (\(overlayFrames(solid((1, 1, 1))).count) reports per frame); attention paints \(attentionLEDs.count) keys at \(String(format: "%.1f", effectiveFps(for: .attention))) fps, pulse \(String(format: "%.2f", pulseHz(for: .attention))) Hz; working paints \(workingLEDs.count) keys, pulse \(String(format: "%.2f", pulseHz(for: .working))) Hz")
     let mgr = startHIDManager(onArrive: true)
     let typing = startTypingMonitor()
+    var builtinTyping: IOHIDManager? = nil
+    if cfg.builtinBacklight, let bl = Backlight() {
+        backlight = bl; builtinTyping = startBuiltinTypingMonitor()
+        log("built-in backlight: on (level \(String(format: "%.2f", bl.level)), auto \(bl.auto)); working \(cfg.builtinWorkingStyle) \(cfg.builtinBreatheSeconds) s, attention \(cfg.builtinAttentionStyle) \(cfg.builtinBlinkHz) Hz, \(Int(cfg.builtinFps)) fps")
+        let bt = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 1 / cfg.builtinFps, 0, 0) { _ in backlightTick() }
+        CFRunLoopAddTimer(CFRunLoopGetMain(), bt, CFRunLoopMode.defaultMode)
+    }
     startBadgePoller()
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
     CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
     CFRunLoopRun()
-    // stopping: leave the board in idle colors
+    // stopping: leave the board in idle colors and hand the built-in backlight back to the user
     if device != nil { _ = sendAll(overlayFrames([])) }   // keys fall back to the black map
-    unlink(sockPath); _ = mgr; _ = typing; log("daemon stopped")
+    backlight?.restore()
+    unlink(sockPath); _ = mgr; _ = typing; _ = builtinTyping; log("daemon stopped")
 case "restore":
     // Write the keyboard's original (cached) config back. Not saved to flash. Stop the daemon first.
     _ = clientSend("STOP"); usleep(2_500_000)
@@ -661,6 +777,6 @@ default:
       kbstatus restore                           stop daemon and write the keyboard's original config back
       kbstatus read-config                       re-read config fragments from the keyboard
       kbstatus daemon                            run the daemon in the foreground
-    config: \(userConfigPath)   log: \(logPath)
+    config: \(userConfigPath)   log: \(logPath)   ("builtinBacklight": true also pulses the MacBook's own keyboard backlight)
     """)
 }
