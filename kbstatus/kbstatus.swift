@@ -68,6 +68,12 @@ struct UserConfig {
     var skipBackgroundMap = false         // the keyboard's own per-key map is already the idle color: never write a map at all
     var overlayRefreshSeconds = 1.5       // solid states are re-sent this often (the keyboard leaves stream mode a few seconds after the last frame)
     var streamGapMs: Double? = nil        // pacing between the fragments of a 0x88 frame (they are never echoed); default = echoWaitMs, or 4 ms on BLE
+    var agtermBadge = false               // light number keys for agterm sessions with unseen notifications (polls agtermctl)
+    var badgeKeys = ["1","2","3","4","5","6","7","8","9"]
+    var badgeColor: RGB = (255, 0, 0)
+    var badgeCount = "sessions"           // sessions (one key per session with a badge) | notifications (sum of badges)
+    var badgePollSeconds = 2.0
+    var agtermctlPath = "/opt/homebrew/bin/agtermctl"
     var vendorID = 0x3554, productID = 0xFA07
 
     static func load() -> UserConfig {
@@ -98,6 +104,12 @@ struct UserConfig {
         if let v = j["overlayRefreshSeconds"] as? Double { c.overlayRefreshSeconds = max(0.5, v) }
         if let v = j["streamGapMs"] as? Double { c.streamGapMs = v }
         if let v = j["productID"] as? Int { c.productID = v }
+        if let v = j["agtermBadge"] as? Bool { c.agtermBadge = v }
+        if let k = j["badgeKeys"] as? [String] { c.badgeKeys = k.map { $0.lowercased() } }
+        c.badgeColor = rgb("badgeColor") ?? c.badgeColor
+        if let v = j["badgeCount"] as? String { c.badgeCount = v }
+        if let v = j["badgePollSeconds"] as? Double { c.badgePollSeconds = max(0.5, v) }
+        if let v = j["agtermctlPath"] as? String { c.agtermctlPath = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
         return c
     }
@@ -108,6 +120,7 @@ let indicatorLEDs: [UInt8] = cfg.indicatorKeys.compactMap { keyLED[$0] }.map { U
 let solidLEDs: [UInt8] = (cfg.solidKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
 let attentionLEDs: [UInt8] = (cfg.attentionKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
 let workingLEDs: [UInt8] = (cfg.workingKeys ?? cfg.indicatorKeys).compactMap { keyLED[$0] }.map { UInt8($0) }.sorted()
+let badgeLEDs: [UInt8] = cfg.badgeKeys.compactMap { keyLED[$0] }.map { UInt8($0) }   // in order: key 1 lights first
 
 // MARK: - protocol -------------------------------------------------------------------------
 
@@ -367,6 +380,54 @@ func pulseHz(for s: Status) -> Double { min(s == .attention ? 2.0 : 0.8, effecti
 func color(for s: Status) -> RGB? { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }
 func style(for s: Status) -> String { s == .working ? cfg.effectiveWorkingStyle : s == .attention ? cfg.attentionStyle : "static" }
 
+// MARK: - agterm badges ---------------------------------------------------------------------
+// The number keys mirror agterm's sidebar badges: one red key per session with unseen notifications
+// (or the sum of the badges). Polled from `agtermctl` on a background thread; agterm clears a badge
+// when the session is selected, so the keys go out by themselves.
+
+var badgeCount = 0                          // protected by stateLock
+func runAgtermctl(_ args: [String]) -> Data? {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: cfg.agtermctlPath); p.arguments = args
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return nil }
+    let d = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+    return p.terminationStatus == 0 ? d : nil
+}
+func agtermJSON(_ args: [String]) -> [String: Any]? {
+    guard let d = runAgtermctl(args), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+    return j["result"] as? [String: Any]
+}
+func pollBadges() -> Int {
+    var windows = ((agtermJSON(["window", "list", "--json"])?["windows"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
+    if windows.isEmpty { windows = [""] }
+    var sessions = 0, notes = 0
+    for w in windows {
+        var args = ["tree", "--json"]; if !w.isEmpty { args += ["--window", w] }
+        guard let tree = agtermJSON(args)?["tree"] as? [String: Any], let wss = tree["workspaces"] as? [[String: Any]] else { continue }
+        for ws in wss { for s in (ws["sessions"] as? [[String: Any]] ?? []) { let u = s["unseen"] as? Int ?? 0; if u > 0 { sessions += 1; notes += u } } }
+    }
+    return cfg.badgeCount == "notifications" ? notes : sessions
+}
+func startBadgePoller() {
+    guard cfg.agtermBadge else { return }
+    guard FileManager.default.isExecutableFile(atPath: cfg.agtermctlPath) else { log("agtermBadge: \(cfg.agtermctlPath) not found; badges disabled"); return }
+    log("agtermBadge: polling every \(cfg.badgePollSeconds) s, counting \(cfg.badgeCount), keys \(badgeLEDs)")
+    Thread {
+        while true {
+            let n = pollBadges()
+            stateLock.lock(); badgeCount = n; stateLock.unlock()
+            Thread.sleep(forTimeInterval: cfg.badgePollSeconds)
+        }
+    }.start()
+}
+var appliedBadge = 0
+/// Badge keys painted red on top of a state's keys (the state color is removed from those keys).
+func withBadge(_ base: [(UInt8, RGB)], _ n: Int) -> [(UInt8, RGB)] {
+    guard n > 0 else { return base }
+    let lit = Array(badgeLEDs.prefix(n))
+    return base.filter { !lit.contains($0.0) } + lit.map { ($0, cfg.badgeColor) }
+}
+
 var appliedStatus: Status? = nil          // status currently painted on the indicator keys
 var backgroundApplied = false             // black per-key map written on this connection
 var lastOverlayWrite = 0.0
@@ -404,26 +465,34 @@ func tick() {
         guard sendAll(perKeyFrames(solidMap(cfg.idle)), abortOnTyping: true, verify: true) else { nextMapAttempt = t + 2.0; return }
         backgroundApplied = true; appliedStatus = nil; log("background map applied (\(lastEchoStats))")
     }
-    // Indicator keys: overlays for every state.
-    let changed = appliedStatus != want
+    // Indicator keys: overlays for every state, with the agterm badge keys composed into each frame.
+    stateLock.lock(); let badge = min(badgeCount, badgeLEDs.count); stateLock.unlock()
+    let changed = appliedStatus != want || appliedBadge != badge
     var ok = true
     switch st {
     case "pulse":
         guard let c = color(for: want) else { break }
         if !changed && t - lastOverlayWrite < 1.0 / cfg.streamFps { return }
         let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * pulseHz(for: want) * t))
-        ok = writeOverlay(leds(for: want, scaled(c, level)))
+        ok = writeOverlay(withBadge(leds(for: want, scaled(c, level)), badge))
     case "blink":
         guard let c = color(for: want) else { break }
         if !changed && t - lastOverlayWrite < 0.5 { return }
-        ok = writeOverlay(t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? leds(for: want, c) : [])
+        ok = writeOverlay(withBadge(t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? leds(for: want, c) : [], badge))
     default:
         if let c = color(for: want) {
             if !changed && t - lastOverlayWrite < cfg.overlayRefreshSeconds { return }
-            ok = writeOverlay(leds(for: want, c))
+            ok = writeOverlay(withBadge(leds(for: want, c), badge))
+        } else if badge > 0 {                          // idle with badges: just the red number keys, refreshed like a solid state
+            if !changed && t - lastOverlayWrite < cfg.overlayRefreshSeconds { return }
+            ok = writeOverlay(withBadge([], badge))
         } else if changed { ok = writeOverlay([]) }   // idle frame hands the keys back to the (black) map; no refresh needed
     }
-    if ok && changed { appliedStatus = want; log("shown: \(want)") }
+    if ok && changed {
+        if appliedStatus != want { log("shown: \(want)") }
+        if appliedBadge != badge { log("badge keys: \(badge)") }
+        appliedStatus = want; appliedBadge = badge
+    }
     if !ok { appliedStatus = nil }
 }
 
@@ -443,7 +512,7 @@ func handle(_ line: String) {
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
+    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
     for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
 }
@@ -545,6 +614,7 @@ case "daemon":
     log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs); solid states paint \(solidLEDs.count) keys (\(overlayFrames(solid((1, 1, 1))).count) reports per frame); attention paints \(attentionLEDs.count) keys at \(String(format: "%.1f", effectiveFps(for: .attention))) fps, pulse \(String(format: "%.2f", pulseHz(for: .attention))) Hz; working paints \(workingLEDs.count) keys, pulse \(String(format: "%.2f", pulseHz(for: .working))) Hz")
     let mgr = startHIDManager(onArrive: true)
     let typing = startTypingMonitor()
+    startBadgePoller()
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
     CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
     CFRunLoopRun()

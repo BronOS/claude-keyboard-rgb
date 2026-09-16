@@ -82,6 +82,7 @@ tail -f ~/.cache/kbstatus/daemon.log
   "typingHoldSeconds": 1,
   "mapQuietSeconds": 10,
   "skipBackgroundMap": false,
+  "agtermBadge": false,
   "productID": 64007,
   "skipConfigWrite": false,
   "echoWaitMs": 0
@@ -128,6 +129,15 @@ default = `echoWaitMs`) and `overlayRefreshSeconds` are the knobs; 100 ms / 1.5 
 Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon
 (`kbstatus stop`) after editing.
+
+## agterm badges on the number row (optional)
+
+With `"agtermBadge": true` the daemon polls `agtermctl` every `badgePollSeconds` (2) and lights
+the number keys red, one per agterm session that has an unseen-notification badge (`"badgeCount":
+"notifications"` sums the badges instead). The keys stay lit in every status, including idle, and
+go out by themselves when you open the session, because agterm clears the badge then. Every open
+agterm window is counted. `badgeKeys`, `badgeColor` and `agtermctlPath` (default
+`/opt/homebrew/bin/agtermctl`) can be changed.
 
 ## How it works (Bluetooth specifics)
 
