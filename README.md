@@ -103,7 +103,9 @@ first with `kbstatus pause`).
 Per-machine notes: the same keyboard paired as `AULA-F87Pro 3.0` (PID `0xFA08`, `"productID": 64008`)
 drops off Bluetooth on every config write and loses per-key fragments at the default pacing. On that
 link use `"skipConfigWrite": true` (the keyboard is already in effect 21) and `"echoWaitMs": 60`
-(wait for the keyboard's echo after each report); `workingStyle` defaults to `static` there. `kbstatus restore` also does a config write, so
+(wait for the keyboard's echo after each report); `workingStyle` defaults to `static` there
+(`pulse` with `"streamFps": 2` also types fine). Its saved per-key map is already dark, so
+`"skipBackgroundMap": true` avoids the one map write that would freeze typing for ~1.4 s. `kbstatus restore` also does a config write, so
 don't run it there. On a new machine run `kbstatus read-config` once (repeat until all 10 fragments
 arrive) so `config.hex` holds that keyboard's own config.
 
