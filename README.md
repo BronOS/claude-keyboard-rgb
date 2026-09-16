@@ -77,7 +77,6 @@ tail -f ~/.cache/kbstatus/daemon.log
   "workingStyle": "pulse",
   "streamFps": 5,
   "typingHoldSeconds": 1,
-  "overlayRefreshSeconds": 15,
   "productID": 64007,
   "skipConfigWrite": false,
   "echoWaitMs": 0
@@ -114,11 +113,16 @@ Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED
   (VID 0x3554, PID 0xFA07). Each report costs ~50 ms over BLE.
 - The daemon writes the config once to switch to per-key mode (effect 21) **without saving
   to flash**; the keyboard reverts to its saved effect when it reboots.
-- A background per-key color map (28 fragments, ~1.4 s, `idle`/`rest` color on every key) is
-  written once per connection, and never while keys are active. Every status after that, solid
-  or pulsing, is painted onto the indicator keys with the `0x88` stream, so a state change costs
-  2 reports. Solid overlays are re-sent every `overlayRefreshSeconds` in case the firmware
-  times them out.
+- Each status is shown twice: first as a 2-report `0x88` overlay on the indicator keys (instant),
+  then as a 28-fragment per-key map (~1.5 s) carrying the same colors. The overlay is needed
+  because the keyboard drops out of stream mode a few seconds after the last `0x88` frame and
+  falls back to the per-key map; the map is what makes a solid state stick with no further
+  traffic. Pulsing styles keep streaming frames; their map holds the pulse-floor color so the
+  keys stay lit while the stream is paused for typing. Map writes are never started while keys
+  are active and are abandoned if typing starts (the map only applies on its trailer fragment).
+- The keyboard echoes every fragment back verbatim. With `echoWaitMs` > 0 map writes wait for
+  each echo and resend a fragment that is not echoed (up to 3 tries); the BT-classic link drops
+  fragments silently otherwise.
 - The `0x88` color stream's data is a sequence of groups
   `R G B count idx1..idxN`, packed 14 bytes per fragment (subcmd = fragment count, byte 4 =
   `0x1E` on full fragments, `0x10+len` on the last). 13 indicator keys fit in 2 fragments,

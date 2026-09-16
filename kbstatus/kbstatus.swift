@@ -59,7 +59,6 @@ struct UserConfig {
     var streamFps = 5.0                   // pulse frame rate; lower = less Bluetooth traffic (keystrokes stall when the link is saturated)
     var echoWaitMs = 0.0                  // >0: after each report wait up to this for the keyboard's echo instead of a fixed gap (BT classic loses fragments otherwise)
     var typingHoldSeconds = 1.0           // no LED writes until this long after the last keystroke on the keyboard (0 = off)
-    var overlayRefreshSeconds = 15.0      // re-send the current solid overlay this often in case the firmware times it out (0 = never)
     var vendorID = 0x3554, productID = 0xFA07
 
     static func load() -> UserConfig {
@@ -78,7 +77,6 @@ struct UserConfig {
         if let v = j["echoWaitMs"] as? Double { c.echoWaitMs = v }
         if let v = j["streamFps"] as? Double { c.streamFps = max(0.5, v) }
         if let v = j["typingHoldSeconds"] as? Double { c.typingHoldSeconds = v }
-        if let v = j["overlayRefreshSeconds"] as? Double { c.overlayRefreshSeconds = v }
         if let v = j["productID"] as? Int { c.productID = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
         return c
@@ -148,6 +146,8 @@ func configFrames(_ original: [[UInt8]], effect: UInt8, colorMode: UInt8) -> [[U
 
 var device: IOHIDDevice? = nil
 var rxLog: [[UInt8]] = []
+var rxLast: [UInt8] = []                   // last report 0x13 received (the keyboard echoes each fragment)
+var rxSeq = 0
 var rxBuf = [UInt8](repeating: 0, count: 64)
 var needFullApply = true
 
@@ -161,42 +161,73 @@ func send(_ f: [UInt8]) -> Bool {
 }
 /// Sends frames back to back. With `abortOnTyping` a long write is abandoned as soon as the user
 /// touches a key (the per-key map only applies on its trailer, so a partial write is harmless).
-func sendAll(_ frames: [[UInt8]], gap: Double = 0.004, abortOnTyping: Bool = false) -> Bool {
+/// Sends frames back to back. With `abortOnTyping` a long write is abandoned as soon as the user
+/// touches a key (the per-key map only applies on its trailer, so a partial write is harmless).
+/// With `verify` (needs echoWaitMs > 0) each fragment must be echoed back verbatim by the keyboard
+/// within echoWaitMs or it is resent, up to 3 tries; the BT-classic link drops fragments silently.
+func sendAll(_ frames: [[UInt8]], gap: Double = 0.004, abortOnTyping: Bool = false, verify: Bool = false) -> Bool {
+    var resent = 0
     for f in frames {
         if abortOnTyping && typingActive() { return false }
-        let n = rxLog.count
-        if !send(f) { return false }
-        if cfg.echoWaitMs > 0 {
-            var waited = 0.0
-            while rxLog.count == n && waited < cfg.echoWaitMs / 1000 { pump(0.005); waited += 0.005 }
-        } else { pump(gap) }
+        var tries = 0
+        while true {
+            let s0 = rxSeq
+            if !send(f) { return false }
+            var echoed = false
+            if cfg.echoWaitMs > 0 {
+                var waited = 0.0
+                while waited < cfg.echoWaitMs / 1000 {
+                    pump(0.005); waited += 0.005
+                    if rxSeq != s0, !verify || rxLast == f { echoed = true; break }
+                }
+            } else { pump(gap) }
+            tries += 1
+            if verify && cfg.echoWaitMs > 0 && !echoed && tries < 3 { resent += 1; continue }
+            if verify && cfg.echoWaitMs > 0 && !echoed { log("fragment not echoed after \(tries) tries: \(hex(f))"); return false }
+            break
+        }
     }
+    if resent > 0 { log("write: \(resent) fragment(s) resent") }
     return true
 }
+
 func attachInputCallback(_ d: IOHIDDevice) {
     IOHIDDeviceRegisterInputReportCallback(d, &rxBuf, rxBuf.count, { _, _, _, _, id, data, len in
-        if id == 0x13 { rxLog.append(Array(UnsafeBufferPointer(start: data, count: len))); if rxLog.count > 64 { rxLog.removeFirst(rxLog.count - 64) } }
+        if id == 0x13 {
+            let b = Array(UnsafeBufferPointer(start: data, count: len))
+            rxLog.append(b); if rxLog.count > 64 { rxLog.removeFirst(rxLog.count - 64) }
+            rxLast = Array(b.prefix(20)); rxSeq &+= 1
+        }
     }, nil)
     IOHIDDeviceScheduleWithRunLoop(d, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
 }
+func usagePage(_ d: IOHIDDevice) -> Int { (IOHIDDeviceGetProperty(d, kIOHIDPrimaryUsagePageKey as CFString) as? Int) ?? 0 }
+/// Prefer a vendor collection if the keyboard exposes one; the BT-classic F87 Pro exposes a single
+/// keyboard collection (page 1, usage 6) that carries report 0x13 as well.
+func pickDevice(_ set: Set<IOHIDDevice>) -> IOHIDDevice? { set.first { usagePage($0) == 0xFF00 } ?? set.first }
+
 func openDevice(_ d: IOHIDDevice) -> Bool {
     let r = IOHIDDeviceOpen(d, 0)
     if r != kIOReturnSuccess { log(String(format: "device open failed 0x%08x (Input Monitoring permission?)", r)); return false }
     attachInputCallback(d); device = d; needFullApply = true
-    log("device attached"); return true
+    log(String(format: "device attached (usage page 0x%04x)", usagePage(d))); return true
 }
+
 func startHIDManager(onArrive: Bool) -> IOHIDManager {
     let mgr = IOHIDManagerCreate(kCFAllocatorDefault, 0)
     IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: cfg.vendorID, kIOHIDProductIDKey: cfg.productID] as CFDictionary)
     if onArrive {
-        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { _, _, _, d in if device == nil { _ = openDevice(d) } }, nil)
+        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { _, _, _, d in if device == nil, usagePage(d) == 0xFF00 { _ = openDevice(d) } }, nil)
         IOHIDManagerRegisterDeviceRemovalCallback(mgr, { _, _, _, d in
             if let cur = device, cur == d { IOHIDDeviceUnscheduleFromRunLoop(cur, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue); device = nil; log("device removed") }
         }, nil)
     }
     IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
     _ = IOHIDManagerOpen(mgr, 0)
-    if device == nil, let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>, let d = set.first { _ = openDevice(d) }
+    if let set = IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice> {
+        log("HID collections: " + set.map { String(format: "page 0x%04x usage 0x%02x", usagePage($0), (IOHIDDeviceGetProperty($0, kIOHIDPrimaryUsageKey as CFString) as? Int) ?? 0) }.joined(separator: ", "))
+        if device == nil, let d = pickDevice(set) { _ = openDevice(d) }
+    }
     return mgr
 }
 
@@ -213,7 +244,7 @@ func startTypingMonitor() -> IOHIDManager {
                                         kIOHIDDeviceUsagePageKey: 0x01, kIOHIDDeviceUsageKey: 0x06] as CFDictionary)
     IOHIDManagerRegisterInputValueCallback(mgr, { _, _, _, v in
         let page = IOHIDElementGetUsagePage(IOHIDValueGetElement(v))
-        if page == 0x07 || page == 0x0C { lastKeyActivity = CFAbsoluteTimeGetCurrent() }   // keys / media keys, not our 0x13 echoes
+        if page == 0x07 || page == 0x0C { lastKeyActivity = CFAbsoluteTimeGetCurrent() }   // keys / media keys; our 0x13 echoes arrive on page 0xFF02
     }, nil)
     IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
     let r = IOHIDManagerOpen(mgr, 0)
@@ -267,71 +298,70 @@ func composite() -> Status {
 func solidMap(_ c: RGB) -> [RGB] { [RGB](repeating: c, count: 126) }
 func indicators(_ c: RGB) -> [(UInt8, RGB)] { indicatorLEDs.map { ($0, c) } }
 func overlayKey(_ leds: [(UInt8, RGB)]) -> [UInt8] { leds.flatMap { [$0.0, $0.1.0, $0.1.1, $0.1.2] } }
+func mapKey(_ m: [RGB]) -> [UInt8] { m.flatMap { [$0.0, $0.1, $0.2] } }
 
-var appliedStatus: Status? = nil
-var appliedBackground: RGB? = nil          // color of the per-key map currently on the board
-var appliedOverlayKey: [UInt8]? = nil      // nil = unknown (force a write)
+func color(for s: Status) -> RGB? { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }
+func style(for s: Status) -> String { s == .working ? cfg.effectiveWorkingStyle : s == .attention ? cfg.attentionStyle : "static" }
+/// The durable look of a status: a per-key map with the indicator keys in the status color (the
+/// pulse floor for pulsing styles, so the keys stay lit while the stream is paused for typing).
+func map(for s: Status) -> [RGB] {
+    var m = solidMap(s == .idle ? cfg.idle : cfg.rest)
+    if let c = color(for: s) { let k = style(for: s) == "pulse" ? scaled(c, cfg.pulseFloor) : c; for l in indicatorLEDs { m[Int(l)] = k } }
+    return m
+}
+
+var appliedStatus: Status? = nil          // status whose overlay was sent
+var appliedMapKey: [UInt8]? = nil          // per-key map currently on the board (nil = unknown)
 var lastOverlayWrite = 0.0
 var lastConfigApply = Date.distantPast
 
-/// Background per-key map: whole board in one color. Written once per connection (28 reports),
-/// and again only if `idle` and `rest` differ and the board switches between them.
-func ensureBackground(_ c: RGB) -> Bool {
-    if needFullApply {
-        guard let orig = loadConfigHex() ?? readConfigFromKeyboard() else { log("no config fragments; cannot enter per-key mode"); return false }
-        if cfg.skipConfigWrite { log("config write skipped (skipConfigWrite; cached config reports effect \(orig[0][15]))") }
-        else if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return false }
-        else { log("per-key mode applied") }
-        needFullApply = false; lastConfigApply = Date(); appliedBackground = nil; appliedOverlayKey = nil
-    }
-    if let a = appliedBackground, a == c { return true }
-    guard sendAll(perKeyFrames(solidMap(c)), abortOnTyping: true) else { return false }
-    appliedBackground = c; appliedOverlayKey = nil; log("background map applied")
+func ensurePerKeyMode() -> Bool {
+    guard needFullApply else { return true }
+    guard let orig = loadConfigHex() ?? readConfigFromKeyboard() else { log("no config fragments; cannot enter per-key mode"); return false }
+    if cfg.skipConfigWrite { log("config write skipped (skipConfigWrite; cached config reports effect \(orig[0][15]))") }
+    else if !sendAll(configFrames(orig, effect: 21, colorMode: 0x01), gap: 0.02) { return false }
+    else { log("per-key mode applied") }
+    needFullApply = false; lastConfigApply = Date(); appliedMapKey = nil; appliedStatus = nil
     return true
 }
-/// Paint the indicator keys with the 0x88 stream (2 reports; the idle frame for an empty list).
-/// Skipped when the same overlay is already showing, unless it is due for a refresh.
-@discardableResult
-func setOverlay(_ leds: [(UInt8, RGB)], force: Bool = false) -> Bool {
-    let key = overlayKey(leds), t = CFAbsoluteTimeGetCurrent()
-    let fresh = cfg.overlayRefreshSeconds <= 0 || t - lastOverlayWrite < cfg.overlayRefreshSeconds
-    if !force, appliedOverlayKey == key, fresh { return true }
-    guard sendAll(overlayFrames(leds), gap: 0.002) else { appliedOverlayKey = nil; return false }
-    appliedOverlayKey = key; lastOverlayWrite = t
-    return true
+/// Paint the indicator keys with the 0x88 stream: 2 reports, shows instantly, but the keyboard
+/// drops back to the per-key map a few seconds after the last stream frame.
+func writeOverlay(_ leds: [(UInt8, RGB)]) -> Bool {
+    guard sendAll(overlayFrames(leds), gap: 0.002) else { return false }
+    lastOverlayWrite = CFAbsoluteTimeGetCurrent(); return true
 }
 func tick() {
     stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
     for c in cmds { handle(c) }
     if stopRequested { CFRunLoopStop(CFRunLoopGetMain()); return }
-    guard device != nil, !typingActive() else { return }
-    let want = composite()
-    guard ensureBackground(want == .idle ? cfg.idle : cfg.rest) else { return }
-    let t = CFAbsoluteTimeGetCurrent()
-    var ok = true
-    switch want {
-    case .idle:
-        ok = setOverlay([])
-    case .done:
-        ok = setOverlay(indicators(cfg.done))
-    case .working, .attention:
-        let color = want == .attention ? cfg.attention : cfg.working
-        let style = want == .attention ? cfg.attentionStyle : cfg.effectiveWorkingStyle
-        switch style {
-        case "pulse":
-            if t - lastOverlayWrite < 1.0 / cfg.streamFps { return }
-            let hz = want == .attention ? 2.0 : 0.8
-            let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * hz * t))
-            ok = setOverlay(indicators(scaled(color, level)), force: true)
-        case "blink":
-            ok = setOverlay(t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? indicators(color) : [])
-        default:
-            ok = setOverlay(indicators(color))
-        }
+    guard device != nil, !typingActive(), ensurePerKeyMode() else { return }
+    let want = composite(), st = style(for: want), t = CFAbsoluteTimeGetCurrent()
+    // 1. instant feedback: one overlay on a status change (pulse/blink styles start streaming below)
+    if appliedStatus != want {
+        if st == "static" { guard writeOverlay(color(for: want).map(indicators) ?? []) else { return } }
+        appliedStatus = want; log("shown: \(want)")
     }
-    if ok, appliedStatus != want { appliedStatus = want; log("shown: \(want)") }
-    if !ok { appliedStatus = nil }
+    // 2. durable state: the per-key map, verified fragment by fragment, abandoned while keys are active
+    let m = map(for: want), key = mapKey(m)
+    if appliedMapKey != key {
+        guard sendAll(perKeyFrames(m), abortOnTyping: true, verify: true) else { return }
+        appliedMapKey = key; log("map applied: \(want)")
+    }
+    // 3. animated styles keep streaming (each frame also keeps the stream mode alive)
+    guard let c = color(for: want) else { return }
+    switch st {
+    case "pulse":
+        if t - lastOverlayWrite < 1.0 / cfg.streamFps { return }
+        let hz = want == .attention ? 2.0 : 0.8
+        let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * hz * t))
+        _ = writeOverlay(indicators(scaled(c, level)))
+    case "blink":
+        if t - lastOverlayWrite < 0.5 { return }
+        _ = writeOverlay(t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? indicators(c) : [])
+    default: break
+    }
 }
+
 func handle(_ line: String) {
     let parts = line.split(separator: " ").map(String.init)
     guard parts.count >= 2, parts[0] == "SET" else { return }
@@ -347,7 +377,7 @@ func handle(_ line: String) {
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\napplied: \(appliedStatus?.rawValue ?? "none")\nworking style: \(cfg.effectiveWorkingStyle)\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
+    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nmap: \(appliedMapKey == nil ? "unknown" : appliedMapKey == mapKey(map(for: composite())) ? "current" : "stale")\nworking style: \(cfg.effectiveWorkingStyle)\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
     for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
 }
@@ -452,7 +482,7 @@ case "daemon":
     CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
     CFRunLoopRun()
     // stopping: leave the board in idle colors
-    if device != nil { _ = sendAll(overlayFrames([])); if appliedBackground == nil || appliedBackground! != cfg.idle { _ = sendAll(perKeyFrames(solidMap(cfg.idle))) } }
+    if device != nil { _ = sendAll(overlayFrames([])); _ = sendAll(perKeyFrames(map(for: .idle)), verify: true) }
     unlink(sockPath); _ = mgr; _ = typing; log("daemon stopped")
 case "restore":
     // Write the keyboard's original (cached) config back. Not saved to flash. Stop the daemon first.
@@ -471,6 +501,15 @@ case "bench":   // bench <fps> <secs> [r g b]  — stream a steady color onto th
     let t0 = Date(); var n = 0
     while Date().timeIntervalSince(t0) < secs { _ = sendAll(overlayFrames(indicatorLEDs.map { ($0, c) }), gap: 0.002); n += 1; pump(max(0.01, 1.0 / fps - 0.1)) }
     _ = sendAll(overlayFrames([])); print("sent \(n) frames in \(Int(secs))s at ~\(fps) fps")
+case "map":     // map r g b | map off  — write a per-key map: indicator keys in that color, rest black (daemon must be paused)
+    _ = startHIDManager(onArrive: false); guard device != nil else { print("keyboard not found"); exit(1) }
+    var m = solidMap((0, 0, 0))
+    if args.count > 3, let r = UInt8(args[1]), let g = UInt8(args[2]), let b = UInt8(args[3]) { for l in indicatorLEDs { m[Int(l)] = (r, g, b) } }
+    let t0 = Date(); let ok = sendAll(perKeyFrames(m), verify: true); pump(0.3)
+    print(ok ? "map written in \(String(format: "%.1f", Date().timeIntervalSince(t0))) s, \(rxLog.count) echoes" : "map write failed")
+case "clear":   // send the 0x88 idle frame (hands the keys back to the per-key map)
+    _ = startHIDManager(onArrive: false); guard device != nil else { print("keyboard not found"); exit(1) }
+    print(sendAll(overlayFrames([])) ? "idle frame sent" : "failed"); pump(0.3)
 case "read-config":
     _ = startHIDManager(onArrive: false)
     guard device != nil else { print("keyboard not found"); exit(1) }
