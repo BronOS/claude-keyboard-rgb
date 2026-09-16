@@ -112,7 +112,11 @@ arrive) so `config.hex` holds that keyboard's own config.
 
 `indicatorKeys` are the keys that pulse; `solidKeys` (default: the same keys, or `"all"`) are the
 keys painted by solid states. One color on all 87 keys is a 7-report frame instead of 2, so a
-solid full board costs ~5 reports/s at the default refresh; keep pulses on the F-row.
+solid full board costs ~5 reports/s at the default refresh; keep pulses on the F-row. The
+BT-classic link loses a fragment now and then, and a full-board frame is more exposed: expect
+a brief blink every half minute or so. `streamGapMs` (pacing between a frame's fragments,
+default = `echoWaitMs`) and `overlayRefreshSeconds` are the knobs; 100 ms / 1.5 s and
+60 ms / 1.0 s both still blink occasionally on this link.
 
 Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon

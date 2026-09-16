@@ -64,6 +64,7 @@ struct UserConfig {
     var mapQuietSeconds = 10.0            // ...and never within this many seconds of a keystroke (a map transfer freezes key scanning ~1.4 s)
     var skipBackgroundMap = false         // the keyboard's own per-key map is already the idle color: never write a map at all
     var overlayRefreshSeconds = 1.5       // solid states are re-sent this often (the keyboard leaves stream mode a few seconds after the last frame)
+    var streamGapMs: Double? = nil        // pacing between the fragments of a 0x88 frame (they are never echoed); default = echoWaitMs, or 4 ms on BLE
     var vendorID = 0x3554, productID = 0xFA07
 
     static func load() -> UserConfig {
@@ -87,6 +88,7 @@ struct UserConfig {
         if let v = j["mapQuietSeconds"] as? Double { c.mapQuietSeconds = v }
         if let v = j["skipBackgroundMap"] as? Bool { c.skipBackgroundMap = v }
         if let v = j["overlayRefreshSeconds"] as? Double { c.overlayRefreshSeconds = max(0.5, v) }
+        if let v = j["streamGapMs"] as? Double { c.streamGapMs = v }
         if let v = j["productID"] as? Int { c.productID = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
         return c
@@ -362,7 +364,9 @@ func ensurePerKeyMode() -> Bool {
 /// are re-sent every overlayRefreshSeconds.
 func writeOverlay(_ leds: [(UInt8, RGB)]) -> Bool {
     lastOverlayWrite = CFAbsoluteTimeGetCurrent()   // interval counts from the frame start: a 7-fragment frame takes ~0.4 s to send
-    return sendAll(overlayFrames(leds), gap: 0.002)
+    let gap = (cfg.streamGapMs ?? (cfg.echoWaitMs > 0 ? cfg.echoWaitMs : 4)) / 1000
+    for f in overlayFrames(leds) { if !send(f) { return false }; pump(gap) }
+    return true
 }
 func tick() {
     stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
