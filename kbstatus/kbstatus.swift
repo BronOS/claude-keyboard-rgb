@@ -54,6 +54,7 @@ struct UserConfig {
     var rest: RGB = (0, 0, 0)             // non-indicator keys while a status is shown (off)
     var idle: RGB = (0, 0, 0)             // whole board when no session is active (off)
     var doneHoldSeconds = 90.0            // "done" fades to idle after this
+    var doneClearsOnTyping = true         // ...or as soon as a key is pressed after Claude finished (agterm-style)
     var workingTimeoutMinutes = 20.0      // a silent "working" session is dropped after this
     var pulseFloor = 0.25                 // pulse dims to this fraction of the color
     var attentionStyle = "pulse"          // pulse (0x88 color stream) | blink (1 s period) | static
@@ -81,6 +82,7 @@ struct UserConfig {
         c.working = rgb("working") ?? c.working; c.done = rgb("done") ?? c.done
         c.attention = rgb("attention") ?? c.attention; c.rest = rgb("rest") ?? c.rest; c.idle = rgb("idle") ?? c.idle
         if let v = j["doneHoldSeconds"] as? Double { c.doneHoldSeconds = v }
+        if let v = j["doneClearsOnTyping"] as? Bool { c.doneClearsOnTyping = v }
         if let v = j["workingTimeoutMinutes"] as? Double { c.workingTimeoutMinutes = v }
         if let v = j["pulseFloor"] as? Double { c.pulseFloor = v }
         if let v = j["attentionStyle"] as? String { c.attentionStyle = v }
@@ -333,6 +335,7 @@ func composite() -> Status {
     let now = Date()
     for (id, s) in sessions {
         if s.status == .done, now.timeIntervalSince(s.since) > cfg.doneHoldSeconds { sessions[id] = nil }
+        if s.status == .done, cfg.doneClearsOnTyping, lastKeyActivity > s.since.timeIntervalSinceReferenceDate + 0.5 { sessions[id] = nil; log("session \(id) done cleared by typing") }
         if s.status == .working, now.timeIntervalSince(s.since) > cfg.workingTimeoutMinutes * 60 { sessions[id] = nil }
     }
     let st = sessions.values.map { $0.status }

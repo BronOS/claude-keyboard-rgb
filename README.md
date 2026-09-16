@@ -48,7 +48,8 @@ device is opened.
 
 The client reads `session_id` from the hook JSON on stdin, so several Claude sessions are
 tracked independently. Priority: attention > working > done > idle. `done` fades to idle
-after 90 s; a silent `working` session is dropped after 20 min.
+after 90 s, or as soon as you press a key on the keyboard (`doneClearsOnTyping`, agterm-style);
+a silent `working` session is dropped after 20 min.
 
 The first client call spawns the daemon (`kbstatus daemon`, detached). Useful commands:
 
@@ -71,6 +72,7 @@ tail -f ~/.cache/kbstatus/daemon.log
   "attention": [255, 0, 0],
   "idle":      [0, 0, 0],
   "doneHoldSeconds": 90,
+  "doneClearsOnTyping": true,
   "workingTimeoutMinutes": 20,
   "pulseFloor": 0.25,
   "attentionStyle": "pulse",
