@@ -176,13 +176,14 @@ func sendAll(_ frames: [[UInt8]], gap: Double = 0.004, abortOnTyping: Bool = fal
             var echoed = false
             if cfg.echoWaitMs > 0 {
                 var waited = 0.0
-                while waited < cfg.echoWaitMs / 1000 {
+                let limit = (verify ? max(cfg.echoWaitMs, 150) : cfg.echoWaitMs) / 1000
+                while waited < limit {
                     pump(0.005); waited += 0.005
                     if rxSeq != s0, !verify || rxLast == f { echoed = true; break }
                 }
             } else { pump(gap) }
             tries += 1
-            if verify && cfg.echoWaitMs > 0 && !echoed && tries < 3 { resent += 1; continue }
+            if verify && cfg.echoWaitMs > 0 && !echoed && tries < 2 { resent += 1; continue }
             if verify && cfg.echoWaitMs > 0 && !echoed { log("fragment not echoed after \(tries) tries: \(hex(f))"); return false }
             break
         }
@@ -237,7 +238,13 @@ func startHIDManager(onArrive: Bool) -> IOHIDManager {
 // covered by the same Input Monitoring grant) and hold all writes while keys are active.
 
 var lastKeyActivity = 0.0
-func typingActive() -> Bool { cfg.typingHoldSeconds > 0 && CFAbsoluteTimeGetCurrent() - lastKeyActivity < cfg.typingHoldSeconds }
+var lastHoldLog = 0.0
+func typingActive() -> Bool {
+    guard cfg.typingHoldSeconds > 0 else { return false }
+    let t = CFAbsoluteTimeGetCurrent(), active = t - lastKeyActivity < cfg.typingHoldSeconds
+    if active, t - lastHoldLog > 30 { lastHoldLog = t; log("typing: writes held") }
+    return active
+}
 func startTypingMonitor() -> IOHIDManager {
     let mgr = IOHIDManagerCreate(kCFAllocatorDefault, 0)
     IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: cfg.vendorID, kIOHIDProductIDKey: cfg.productID,
@@ -313,6 +320,7 @@ func map(for s: Status) -> [RGB] {
 var appliedStatus: Status? = nil          // status whose overlay was sent
 var appliedMapKey: [UInt8]? = nil          // per-key map currently on the board (nil = unknown)
 var lastOverlayWrite = 0.0
+var nextMapAttempt = 0.0                   // backoff after a failed/abandoned map write (never retry in a tight loop)
 var lastConfigApply = Date.distantPast
 
 func ensurePerKeyMode() -> Bool {
@@ -344,7 +352,8 @@ func tick() {
     // 2. durable state: the per-key map, verified fragment by fragment, abandoned while keys are active
     let m = map(for: want), key = mapKey(m)
     if appliedMapKey != key {
-        guard sendAll(perKeyFrames(m), abortOnTyping: true, verify: true) else { return }
+        if t < nextMapAttempt || t - lastOverlayWrite < 0.25 { return }   // let the keyboard finish the stream frame first
+        guard sendAll(perKeyFrames(m), abortOnTyping: true, verify: true) else { nextMapAttempt = t + 2.0; return }
         appliedMapKey = key; log("map applied: \(want)")
     }
     // 3. animated styles keep streaming (each frame also keeps the stream mode alive)
