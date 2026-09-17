@@ -70,3 +70,22 @@ func solidMap(_ c: RGB) -> [RGB] { [RGB](repeating: c, count: 126) }
 
 enum Status: String { case idle, working, done, attention }
 struct SessionState { var status: Status; var since: Date }
+
+// MARK: - picture ----------------------------------------------------------------------------
+
+/// What every output should show at one instant. Computed once per tick from the session table,
+/// the agterm badge count and the clock; each renderer (keyboard, strip) turns it into frames.
+struct Picture { var status: Status; var style: String; var badge: Int; var t: Double }
+
+/// Style a status is drawn in: working and attention are configurable, done is always solid,
+/// idle has nothing to draw (its style is irrelevant).
+func styleFor(_ s: Status, working: String, attention: String) -> String {
+    s == .working ? working : s == .attention ? attention : "static"
+}
+/// Cosine pulse between `floor` and 1, `hz` cycles per second, phase-locked to the clock.
+func pulseLevel(t: Double, hz: Double, floor: Double) -> Double {
+    floor + (1 - floor) * (0.5 - 0.5 * cos(2 * .pi * hz * t))
+}
+/// A pulse needs at least 4 frames per cycle to look like one (2 Hz sampled at 2 fps is flicker).
+func cappedHz(nominal: Double, fps: Double) -> Double { min(nominal, fps / 4) }
+let nominalPulseHz: [Status: Double] = [.attention: 2.0, .working: 0.8]

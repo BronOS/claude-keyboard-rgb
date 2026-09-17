@@ -317,10 +317,16 @@ func effectiveFps(for s: Status) -> Double {
     let frameTime = Double(overlayFrames(leds(for: s, (1, 1, 1))).count) * gap
     return min(cfg.streamFps, frameTime > 0 ? 1 / frameTime : cfg.streamFps)
 }
-/// Pulse rate: the nominal one, slowed so that every cycle gets at least 4 frames (2 Hz sampled at 2 fps is just flicker).
-func pulseHz(for s: Status) -> Double { min(s == .attention ? 2.0 : 0.8, effectiveFps(for: s) / 4) }
+/// Pulse rate for the keyboard: the nominal one, slowed to the frame rate this key set can get.
+func pulseHz(for s: Status) -> Double { cappedHz(nominal: nominalPulseHz[s] ?? 0.8, fps: effectiveFps(for: s)) }
 func color(for s: Status) -> RGB? { switch s { case .working: return cfg.working; case .done: return cfg.done; case .attention: return cfg.attention; case .idle: return nil } }
-func style(for s: Status) -> String { s == .working ? cfg.effectiveWorkingStyle : s == .attention ? cfg.attentionStyle : "static" }
+func style(for s: Status) -> String { styleFor(s, working: cfg.effectiveWorkingStyle, attention: cfg.attentionStyle) }
+/// The picture for this instant: composite status, its style, the agterm badge count (capped to the badge keys).
+func currentPicture() -> Picture {
+    stateLock.lock(); let badge = min(badgeCount, badgeLEDs.count); stateLock.unlock()
+    let s = composite()
+    return Picture(status: s, style: style(for: s), badge: badge, t: CFAbsoluteTimeGetCurrent())
+}
 
 // MARK: - agterm badges ---------------------------------------------------------------------
 // The number keys mirror agterm's sidebar badges: one red key per session with unseen notifications
@@ -400,7 +406,12 @@ func tick() {
     for c in cmds { handle(c) }
     if stopRequested { CFRunLoopStop(CFRunLoopGetMain()); return }
     guard device != nil, !linkAsleep(), ensurePerKeyMode() else { return }
-    let want = composite(), st = style(for: want), t = CFAbsoluteTimeGetCurrent()
+    let pic = currentPicture()
+    renderKeyboard(pic)
+}
+/// Keyboard renderer: paints the picture with 0x88 overlays (see the design note at the top of the file).
+func renderKeyboard(_ pic: Picture) {
+    let want = pic.status, st = pic.style, t = pic.t, badge = pic.badge
     // Background map (all keys idle color): written once per connection. A map transfer freezes the
     // keyboard for its whole duration (~1.4 s), so only after 3 s of quiet, verified fragment by fragment.
     if !backgroundApplied, !typingActive(), t - max(lastKeyActivity, daemonStart) >= cfg.mapQuietSeconds, t >= nextMapAttempt, t - lastOverlayWrite >= 0.25 {
@@ -408,14 +419,13 @@ func tick() {
         backgroundApplied = true; appliedStatus = nil; log("background map applied (\(lastEchoStats))")
     }
     // Indicator keys: overlays for every state, with the agterm badge keys composed into each frame.
-    stateLock.lock(); let badge = min(badgeCount, badgeLEDs.count); stateLock.unlock()
     let changed = appliedStatus != want || appliedBadge != badge
     var ok = true
     switch st {
     case "pulse":
         guard let c = color(for: want) else { break }
         if !changed && t - lastOverlayWrite < 1.0 / cfg.streamFps { return }
-        let level = cfg.pulseFloor + (1 - cfg.pulseFloor) * (0.5 - 0.5 * cos(2 * .pi * pulseHz(for: want) * t))
+        let level = pulseLevel(t: t, hz: pulseHz(for: want), floor: cfg.pulseFloor)
         ok = writeOverlay(withBadge(leds(for: want, scaled(c, level)), badge))
     case "blink":
         guard let c = color(for: want) else { break }

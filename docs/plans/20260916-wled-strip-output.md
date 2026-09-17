@@ -158,15 +158,15 @@
 **Files:**
 - Modify: `kbstatus/core.swift`, `kbstatus/main.swift`, `kbstatus/tests/main.swift`
 
-- [ ] add `struct Picture` and `pulseLevel(t:hz:floor:)`, `cappedHz(nominal:fps:)` to `core.swift`
-- [ ] in `main.swift`, make `tick()` build one `Picture` (composite status, `style(for:)`, badge count
+- [x] add `struct Picture` and `pulseLevel(t:hz:floor:)`, `cappedHz(nominal:fps:)` to `core.swift`
+- [x] in `main.swift`, make `tick()` build one `Picture` (composite status, `style(for:)`, badge count
       under `stateLock`, `CFAbsoluteTimeGetCurrent()`), and have the keyboard branch read status/style/
       badge/level from it; `pulseHz(for:)` becomes `cappedHz(nominal:fps: effectiveFps(for:))`
-- [ ] keep every keyboard decision identical: same early returns, same `changed` logic, same log lines
-- [ ] write tests: `pulseLevel` at t=0 equals `floor`, at half period equals 1, never leaves
+- [x] keep every keyboard decision identical: same early returns, same `changed` logic, same log lines
+- [x] write tests: `pulseLevel` at t=0 equals `floor`, at half period equals 1, never leaves
       `[floor, 1]`; `cappedHz` returns the nominal rate when fps is high and `fps/4` when low; a
       `Picture` for each status carries the expected style given a `workingStyle`
-- [ ] run `kbstatus/test.sh` - must pass; rebuild, reinstall, keyboard regression check before task 3
+- [x] run `kbstatus/test.sh` - must pass; rebuild, reinstall, keyboard regression check before task 3
 
 ### Task 3: Strip config and LED color mapping (pure)
 

@@ -105,5 +105,30 @@ do {
 // MARK: solidMap
 check(solidMap((1, 2, 3)).count == 126 && eq(solidMap((1, 2, 3))[125], (1, 2, 3)), "solidMap fills 126 slots")
 
+// MARK: picture / pulse math
+do {
+    let floor = 0.25
+    check(abs(pulseLevel(t: 0, hz: 2, floor: floor) - floor) < 1e-9, "pulse starts at the floor")
+    check(abs(pulseLevel(t: 0.25, hz: 2, floor: floor) - 1) < 1e-9, "pulse peaks at half a period")
+    check(abs(pulseLevel(t: 0.5, hz: 2, floor: floor) - floor) < 1e-9, "pulse returns to the floor after one period")
+    var inRange = true
+    for i in 0..<1000 { let l = pulseLevel(t: Double(i) * 0.0137, hz: 0.8, floor: floor); if l < floor - 1e-9 || l > 1 + 1e-9 { inRange = false } }
+    check(inRange, "pulse level never leaves [floor, 1]")
+    check(abs(pulseLevel(t: 0.25, hz: 2, floor: 0) - 1) < 1e-9 && abs(pulseLevel(t: 0, hz: 2, floor: 0)) < 1e-9, "floor 0 spans 0...1")
+
+    check(cappedHz(nominal: 2.0, fps: 10) == 2.0, "high fps keeps the nominal rate")
+    check(cappedHz(nominal: 2.0, fps: 2.4) == 0.6, "2.4 fps caps the pulse to 0.6 Hz")
+    check(cappedHz(nominal: 0.8, fps: 3) == 0.75, "working at 3 fps -> 0.75 Hz")
+    check(nominalPulseHz[.attention] == 2.0 && nominalPulseHz[.working] == 0.8 && nominalPulseHz[.done] == nil, "nominal rates: attention 2 Hz, working 0.8 Hz, none for done")
+
+    check(styleFor(.working, working: "pulse", attention: "static") == "pulse", "working takes the working style")
+    check(styleFor(.working, working: "static", attention: "pulse") == "static", "working static when configured")
+    check(styleFor(.attention, working: "static", attention: "blink") == "blink", "attention takes the attention style")
+    check(styleFor(.done, working: "pulse", attention: "pulse") == "static", "done is always static")
+    check(styleFor(.idle, working: "pulse", attention: "pulse") == "static", "idle reports static")
+    let pic = Picture(status: .attention, style: styleFor(.attention, working: "pulse", attention: "pulse"), badge: 3, t: 12.5)
+    check(pic.status == .attention && pic.style == "pulse" && pic.badge == 3 && pic.t == 12.5, "Picture carries status, style, badge, time")
+}
+
 print("\(checks) checks, \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
