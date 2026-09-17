@@ -98,9 +98,10 @@
   it as is, blink alternates on/off per second like the keyboard; badge LEDs = `min(badge, count)`
   from the start of `badgeRange`; result scaled by `brightness`.
 - **DDP packet** (core): `ddpPacket(colors: [RGB], sequence: UInt8) -> [UInt8]` = 10-byte header +
-  3·N bytes: `[0x41 (version 1 | push), seq & 0x0F, 0x01 (RGB 8-bit), 0x01 (output 1), offset u32 BE
-  = 0, length u16 BE = 3·N] + RGB…`. One packet per frame (60 LEDs = 190 bytes; WLED accepts up to
-  480 LEDs per packet, so `leds` > 480 is rejected by `parse`).
+  3·N bytes: `[0x41 (version 1 | push), seq & 0x0F, 0x0B (RGB, 8 bits per channel), 0x01 (output 1),
+  offset u32 BE, length u16 BE] + RGB…`. ➕ Frames are split like WLED's own sender: 480 channels
+  (160 LEDs) per packet with channel offsets, push flag only on the last packet (`ddpFrame`). 60 LEDs =
+  one 190-byte packet; `leds` > 480 is rejected by `parse`.
 - **UDP sender** (main): BSD `socket(AF_INET/AF_INET6, SOCK_DGRAM)` from `getaddrinfo(host, port)`;
   `sendto` per frame; on `-1` log once and schedule re-resolve; sequence number increments per packet.
 - **Strip renderer state** (main): `lastStripSend`, `lastStripKey` (status+style+badge+quantized
@@ -173,32 +174,32 @@
 **Files:**
 - Modify: `kbstatus/core.swift`, `kbstatus/tests/main.swift`
 
-- [ ] add `struct StripConfig` with `parse(_ dict: [String: Any]) -> (StripConfig?, String?)`:
+- [x] add `struct StripConfig` with `parse(_ dict: [String: Any]) -> (StripConfig?, String?)`:
       requires `host` and `leds` (1…480), `statusRange`/`badgeRange` as `[Int, Int]` within `0..<leds`
       and non-overlapping, `brightness` clamped to 0…1, `transport` must be `"ddp"`, defaults for the rest
-- [ ] add `struct StatusColors { working, done, attention, badge: RGB }` and
+- [x] add `struct StatusColors { working, done, attention, badge: RGB }` and
       `stripColors(_ p: Picture, _ cfg: StripConfig, _ colors: StatusColors, floor: Double) -> [RGB]`
-- [ ] implement: idle → all off (badge LEDs still lit if badge > 0); static → state color; pulse →
+- [x] implement: idle → all off (badge LEDs still lit if badge > 0); static → state color; pulse →
       state color × `pulseLevel(t, hz: cappedHz(nominal, fps: 10), floor)`; blink → on for the first
       half of each second; badge LEDs from the start of `badgeRange`, `min(badge, rangeCount)`; final
       `brightness` scaling via `scaled`
-- [ ] write tests: parse success with defaults filled; parse failures (missing host, leds 0 and 481,
+- [x] write tests: parse success with defaults filled; parse failures (missing host, leds 0 and 481,
       range outside leds, overlapping ranges, transport "serial") return a reason; mapping for each
       status with and without badges; badge count capped to the range; brightness 0.5 halves values;
       LEDs outside both ranges stay black
-- [ ] run `kbstatus/test.sh` - must pass before task 4
+- [x] run `kbstatus/test.sh` - must pass before task 4
 
 ### Task 4: DDP packet builder (pure)
 
 **Files:**
 - Modify: `kbstatus/core.swift`, `kbstatus/tests/main.swift`
 
-- [ ] add `ddpPacket(_ colors: [RGB], sequence: UInt8) -> [UInt8]` producing the 10-byte header
+- [x] add `ddpPacket(_ colors: [RGB], sequence: UInt8) -> [UInt8]` producing the 10-byte header
       (`0x41`, `seq & 0x0F`, `0x01`, `0x01`, offset 0 big-endian u32, length big-endian u16) + RGB bytes
-- [ ] write tests: 60 LEDs → 190 bytes, header bytes exact, length field 180 = `0x00 0xB4`; 1 LED →
+- [x] write tests: 60 LEDs → 190 bytes, header bytes exact, length field 180 = `0x00 0xB4`; 1 LED →
       13 bytes; sequence 17 wraps to 1; colors land in order R,G,B per LED; 0 LEDs → header with
       length 0
-- [ ] run `kbstatus/test.sh` - must pass before task 5
+- [x] run `kbstatus/test.sh` - must pass before task 5
 
 ### Task 5: UDP sender and strip renderer in the daemon
 

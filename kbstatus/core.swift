@@ -89,3 +89,92 @@ func pulseLevel(t: Double, hz: Double, floor: Double) -> Double {
 /// A pulse needs at least 4 frames per cycle to look like one (2 Hz sampled at 2 fps is flicker).
 func cappedHz(nominal: Double, fps: Double) -> Double { min(nominal, fps / 4) }
 let nominalPulseHz: [Status: Double] = [.attention: 2.0, .working: 0.8]
+
+// MARK: - strip (WLED over DDP) -------------------------------------------------------------
+
+/// The `strip` block of config.json.
+struct StripConfig {
+    var host: String
+    var port: UInt16 = 4048
+    var leds: Int
+    var statusRange: ClosedRange<Int>          // LEDs that show the status color
+    var badgeRange: ClosedRange<Int>? = nil    // LEDs that show the agterm badge count, one per badge from the start
+    var brightness: Double = 0.6               // 0...1, scales every color
+    var keepAliveSeconds: Double = 1.0         // re-send a solid state this often (WLED leaves realtime mode after its timeout)
+    var transport = "ddp"                      // only "ddp" for now; "serial" is reserved
+
+    static let maxLeds = 480
+
+    /// Parses the block; on rejection returns nil and the reason.
+    static func parse(_ j: [String: Any]) -> (StripConfig?, String?) {
+        guard let host = j["host"] as? String, !host.isEmpty else { return (nil, "strip.host missing") }
+        guard let leds = j["leds"] as? Int, leds >= 1, leds <= maxLeds else { return (nil, "strip.leds must be 1...\(maxLeds)") }
+        func range(_ key: String) -> (ClosedRange<Int>?, String?) {
+            guard let v = j[key] else { return (nil, nil) }
+            guard let a = v as? [Int], a.count == 2, a[0] <= a[1], a[0] >= 0, a[1] < leds else { return (nil, "strip.\(key) must be [first, last] within 0...\(leds - 1)") }
+            return (a[0]...a[1], nil)
+        }
+        let (sr, e1) = range("statusRange"); if let e = e1 { return (nil, e) }
+        let (br, e2) = range("badgeRange"); if let e = e2 { return (nil, e) }
+        let status = sr ?? 0...(leds - 1)
+        if let b = br, status.overlaps(b) { return (nil, "strip.statusRange and strip.badgeRange overlap") }
+        var c = StripConfig(host: host, leds: leds, statusRange: status, badgeRange: br)
+        if let p = j["port"] as? Int { guard p >= 1, p <= 65535 else { return (nil, "strip.port out of range") }; c.port = UInt16(p) }
+        if let b = j["brightness"] as? Double { c.brightness = max(0, min(1, b)) }
+        if let k = j["keepAliveSeconds"] as? Double { c.keepAliveSeconds = max(0.2, k) }
+        if let t = j["transport"] as? String { c.transport = t }
+        guard c.transport == "ddp" else { return (nil, "strip.transport \"\(c.transport)\" not supported (only ddp)") }
+        return (c, nil)
+    }
+}
+
+struct StatusColors { var working: RGB; var done: RGB; var attention: RGB; var badge: RGB }
+
+/// The strip's colors for a picture: status LEDs in the state color at the pulse level, badge LEDs
+/// lit one per badge, everything else off, all scaled by brightness. `fps` is the rate the strip is
+/// refreshed at while pulsing (it caps the pulse rate like on the keyboard).
+func stripColors(_ p: Picture, _ cfg: StripConfig, _ colors: StatusColors, floor: Double, fps: Double = 10) -> [RGB] {
+    var out = [RGB](repeating: (0, 0, 0), count: cfg.leds)
+    let color: RGB? = { switch p.status { case .working: return colors.working; case .done: return colors.done; case .attention: return colors.attention; case .idle: return nil } }()
+    if let c = color {
+        let level: Double
+        switch p.style {
+        case "pulse": level = pulseLevel(t: p.t, hz: cappedHz(nominal: nominalPulseHz[p.status] ?? 0.8, fps: fps), floor: floor)
+        case "blink": level = p.t.truncatingRemainder(dividingBy: 1.0) < 0.5 ? 1 : 0
+        default: level = 1
+        }
+        let lit = scaled(c, level)
+        for i in cfg.statusRange { out[i] = lit }
+    }
+    if let br = cfg.badgeRange, p.badge > 0 {
+        for i in br.lowerBound ..< br.lowerBound + min(p.badge, br.count) { out[i] = colors.badge }
+    }
+    return cfg.brightness == 1 ? out : out.map { scaled($0, cfg.brightness) }
+}
+
+// MARK: - DDP packets --------------------------------------------------------------------------
+// Distributed Display Protocol as WLED receives it on UDP 4048: a 10-byte header + RGB bytes.
+// Byte 0 = flags (0x40 version 1, 0x01 push = show this frame now), byte 1 = sequence (1...15,
+// 0 = unused), byte 2 = data type (0x0B = RGB, 8 bits per channel), byte 3 = destination id
+// (1 = default output), bytes 4-7 = channel offset (big-endian), bytes 8-9 = data length (big-endian).
+
+let ddpFlagsVersion1: UInt8 = 0x40, ddpFlagsPush: UInt8 = 0x01, ddpTypeRGB8: UInt8 = 0x0B, ddpDestinationDefault: UInt8 = 0x01
+let ddpChannelsPerPacket = 480   // WLED's own sender splits at 480 channels (160 RGB LEDs); the receiver accepts up to 1440
+
+/// One DDP packet carrying `colors` starting at LED `offset`. `push` marks the last packet of a frame.
+func ddpPacket(_ colors: ArraySlice<RGB>, offset: Int, sequence: UInt8, push: Bool = true) -> [UInt8] {
+    let length = colors.count * 3, chOffset = offset * 3
+    var p: [UInt8] = [ddpFlagsVersion1 | (push ? ddpFlagsPush : 0), sequence & 0x0F, ddpTypeRGB8, ddpDestinationDefault,
+                      UInt8((chOffset >> 24) & 0xFF), UInt8((chOffset >> 16) & 0xFF), UInt8((chOffset >> 8) & 0xFF), UInt8(chOffset & 0xFF),
+                      UInt8((length >> 8) & 0xFF), UInt8(length & 0xFF)]
+    p.reserveCapacity(10 + length)
+    for c in colors { p.append(c.0); p.append(c.1); p.append(c.2) }
+    return p
+}
+/// A whole frame: one packet per 160 LEDs, push set on the last one, all sharing `sequence`.
+func ddpFrame(_ colors: [RGB], sequence: UInt8) -> [[UInt8]] {
+    let per = ddpChannelsPerPacket / 3
+    if colors.isEmpty { return [ddpPacket([], offset: 0, sequence: sequence)] }
+    let starts = stride(from: 0, to: colors.count, by: per)
+    return starts.map { s in ddpPacket(colors[s ..< min(s + per, colors.count)], offset: s, sequence: sequence, push: s + per >= colors.count) }
+}

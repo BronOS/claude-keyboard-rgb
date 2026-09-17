@@ -130,5 +130,75 @@ do {
     check(pic.status == .attention && pic.style == "pulse" && pic.badge == 3 && pic.t == 12.5, "Picture carries status, style, badge, time")
 }
 
+// MARK: strip config
+do {
+    let (c, e) = StripConfig.parse(["host": "10.0.0.5", "leds": 60])
+    check(e == nil && c != nil, "minimal strip block parses: \(e ?? "")")
+    if let c = c {
+        check(c.port == 4048 && c.brightness == 0.6 && c.keepAliveSeconds == 1.0 && c.transport == "ddp", "defaults filled")
+        check(c.statusRange == 0...59 && c.badgeRange == nil, "status range defaults to the whole strip, no badge range")
+    }
+    let (f, _) = StripConfig.parse(["host": "wled.lan", "leds": 60, "statusRange": [0, 49], "badgeRange": [50, 59], "brightness": 1.7, "keepAliveSeconds": 0.05, "port": 5000])
+    check(f?.statusRange == 0...49 && f?.badgeRange == 50...59, "ranges parse")
+    check(f?.brightness == 1 && f?.keepAliveSeconds == 0.2 && f?.port == 5000, "brightness clamps to 1, keep-alive floors at 0.2 s, port taken")
+    func rejects(_ j: [String: Any], _ why: String) { let (c, e) = StripConfig.parse(j); check(c == nil && e != nil, "rejects \(why): \(e ?? "no reason")") }
+    rejects(["leds": 60], "missing host")
+    rejects(["host": "", "leds": 60], "empty host")
+    rejects(["host": "h", "leds": 0], "leds 0")
+    rejects(["host": "h", "leds": 481], "leds 481")
+    rejects(["host": "h", "leds": 60, "statusRange": [0, 60]], "status range past the end")
+    rejects(["host": "h", "leds": 60, "statusRange": [10, 5]], "reversed range")
+    rejects(["host": "h", "leds": 60, "statusRange": [0, 30], "badgeRange": [30, 40]], "overlapping ranges")
+    rejects(["host": "h", "leds": 60, "transport": "serial"], "serial transport")
+    rejects(["host": "h", "leds": 60, "port": 70000], "port out of range")
+}
+
+// MARK: strip colors
+do {
+    let cfg = StripConfig(host: "h", leds: 10, statusRange: 0...6, badgeRange: 7...9, brightness: 1)
+    let colors = StatusColors(working: (0, 90, 255), done: (0, 255, 40), attention: (255, 0, 0), badge: (255, 120, 0))
+    func pic(_ s: Status, _ style: String, badge: Int = 0, t: Double = 0.25) -> Picture { Picture(status: s, style: style, badge: badge, t: t) }
+    let done = stripColors(pic(.done, "static"), cfg, colors, floor: 0.25)
+    check(done.count == 10, "one color per LED")
+    check((0...6).allSatisfy { eq(done[$0], (0, 255, 40)) } && (7...9).allSatisfy { eq(done[$0], (0, 0, 0)) }, "done: status LEDs green, badge LEDs off")
+    let idle = stripColors(pic(.idle, "static"), cfg, colors, floor: 0.25)
+    check(idle.allSatisfy { eq($0, (0, 0, 0)) }, "idle: all off")
+    let idleBadge = stripColors(pic(.idle, "static", badge: 2), cfg, colors, floor: 0.25)
+    check(eq(idleBadge[7], (255, 120, 0)) && eq(idleBadge[8], (255, 120, 0)) && eq(idleBadge[9], (0, 0, 0)) && eq(idleBadge[0], (0, 0, 0)), "idle with 2 badges: first two badge LEDs lit")
+    let capped = stripColors(pic(.done, "static", badge: 9), cfg, colors, floor: 0.25)
+    check((7...9).allSatisfy { eq(capped[$0], (255, 120, 0)) }, "badge count capped to the badge range")
+    let peak = stripColors(pic(.attention, "pulse", t: 0.25), cfg, colors, floor: 0.25)     // 2 Hz at 10 fps -> peak at t = 0.25
+    check(eq(peak[0], (255, 0, 0)), "attention pulse at its peak is full red")
+    let trough = stripColors(pic(.attention, "pulse", t: 0), cfg, colors, floor: 0.25)
+    check(eq(trough[0], (64, 0, 0)), "attention pulse at its floor is 25% red, got \(trough[0])")
+    let blinkOn = stripColors(pic(.working, "blink", t: 3.1), cfg, colors, floor: 0.25), blinkOff = stripColors(pic(.working, "blink", t: 3.6), cfg, colors, floor: 0.25)
+    check(eq(blinkOn[0], (0, 90, 255)) && eq(blinkOff[0], (0, 0, 0)), "blink: on in the first half second, off in the second")
+    var dim = cfg; dim.brightness = 0.5
+    let half = stripColors(pic(.done, "static", badge: 1), dim, colors, floor: 0.25)
+    check(eq(half[0], (0, 128, 20)) && eq(half[7], (128, 60, 0)), "brightness 0.5 halves status and badge colors, got \(half[0]) \(half[7])")
+    let noBadgeRange = StripConfig(host: "h", leds: 5, statusRange: 0...2, badgeRange: nil, brightness: 1)
+    let nb = stripColors(pic(.done, "static", badge: 3), noBadgeRange, colors, floor: 0.25)
+    check(eq(nb[3], (0, 0, 0)) && eq(nb[4], (0, 0, 0)), "without a badge range, badges are not drawn and spare LEDs stay off")
+}
+
+// MARK: DDP packets
+do {
+    let colors: [RGB] = (0..<60).map { (UInt8($0), UInt8(100 + $0), UInt8(200 - $0)) }
+    let f = ddpFrame(colors, sequence: 3)
+    check(f.count == 1 && f[0].count == 190, "60 LEDs = one packet of 190 bytes, got \(f.count) x \(f[0].count)")
+    check(Array(f[0][0..<10]) == [0x41, 3, 0x0B, 0x01, 0, 0, 0, 0, 0x00, 0xB4], "header: ver1|push, seq 3, RGB8, dest 1, offset 0, length 180; got \(hex(Array(f[0][0..<10])))")
+    check(Array(f[0][10..<13]) == [0, 100, 200] && Array(f[0][187..<190]) == [59, 159, 141], "RGB bytes in order")
+    check(ddpFrame([(1, 2, 3)], sequence: 17)[0][1] == 1, "sequence wraps to 4 bits (17 -> 1)")
+    check(ddpFrame([(1, 2, 3)], sequence: 1)[0].count == 13, "1 LED = 13 bytes")
+    let empty = ddpFrame([], sequence: 1)
+    check(empty.count == 1 && empty[0].count == 10 && empty[0][8] == 0 && empty[0][9] == 0, "0 LEDs = header only, length 0")
+    let big = ddpFrame([RGB](repeating: (9, 9, 9), count: 400), sequence: 2)
+    check(big.count == 3, "400 LEDs split into 3 packets (160+160+80), got \(big.count)")
+    check(big[0][0] == 0x40 && big[1][0] == 0x40 && big[2][0] == 0x41, "push flag only on the last packet")
+    check(Array(big[1][4..<8]) == [0, 0, 0x01, 0xE0] && Array(big[1][8..<10]) == [0x01, 0xE0], "second packet: channel offset 480, length 480")
+    check(Array(big[2][4..<8]) == [0, 0, 0x03, 0xC0] && Array(big[2][8..<10]) == [0x00, 0xF0], "third packet: offset 960, length 240")
+    check(big.allSatisfy { $0[1] == 2 }, "all packets of a frame share the sequence number")
+}
+
 print("\(checks) checks, \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
