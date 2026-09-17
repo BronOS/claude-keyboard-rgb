@@ -11,6 +11,7 @@ orange when it is waiting for a permission decision.
 | `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID, no dependencies) |
 | `kbstatus/core.swift` | pure protocol code shared by the daemon and the tests (frames, key map, state types) |
 | `kbstatus/tests/main.swift`, `kbstatus/test.sh` | assert-based tests: `kbstatus/test.sh` builds and runs them |
+| `probe/ddp-fake.py` | fake WLED receiver: validates DDP packets on UDP 4048 and draws the strip in the terminal |
 | `probe/kbtest.swift` | protocol experiment tool (`read`, `experiment`, `perkey`, `effect`, `stream`) |
 | `probe/hidprobe2.swift` | first minimal probe |
 | `docs/research/` | protocol findings for the F87 Pro over BLE, with links to the upstream research |
@@ -132,6 +133,40 @@ Key names are the lowercase labels from the key map in `core.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon
 (`kbstatus stop`) after editing.
 
+## LED strip (optional): WLED over Wi-Fi
+
+An addressable LED strip on a WLED controller (ESP32 + WS2812B) shows the same status as the
+keyboard, visible from across the room and awake when the keyboard is not. The daemon sends WLED's
+DDP realtime protocol over UDP, port 4048: a frame on every change, at 10 fps while a state pulses,
+one keep-alive per second while a solid state is shown, and one all-off frame when idle. No
+acknowledgement, no retries; a lost packet is repaired by the next frame.
+
+```json
+"strip": {
+  "host": "192.168.30.42",
+  "leds": 60,
+  "statusRange": [0, 49],
+  "badgeRange": [50, 59],
+  "brightness": 0.6,
+  "keepAliveSeconds": 1.0
+}
+```
+
+`statusRange` shows the state color (pulsing like the keyboard); `badgeRange` lights one LED per
+agterm badge (see below) from its start; other LEDs stay off. Both default to the whole strip and
+none. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's own sender).
+`host` is an IP or DNS name; mDNS `.local` names do not cross VLANs, so give the board a DHCP
+reservation. Remove the block to turn the strip off; the keyboard never depends on it.
+
+Board setup, once, in the WLED web page: LED count and type (an RGBW strip: type SK6812 RGBW,
+auto-white "none"), a current limit for USB power, DDP receiver on (default), realtime timeout
+about 2000 ms so the strip goes dark when nothing is sent. Then:
+
+```sh
+kbstatus stop; kbstatus strip-test          # red, green, blue sweep + badge pattern, 1 s each
+python3 probe/ddp-fake.py --leds 60         # with "host": "127.0.0.1": see the frames on the Mac
+```
+
 ## agterm badges on the number row (optional)
 
 With `"agtermBadge": true` the daemon polls `agtermctl` every `badgePollSeconds` (2) and lights
@@ -174,6 +209,11 @@ agterm window is counted. `badgeKeys`, `badgeColor` and `agtermctlPath` (default
   `kbstatus read-config` reopens the device between attempts and caches the result in
   `~/.config/kbstatus/config.hex`.
 - On reconnect the daemon re-applies per-key mode, the background map, and the current state.
+- Internally every tick computes one `Picture` (composite status, style, badge count, time) and each
+  output renders it: the keyboard renderer paints overlays, the strip renderer maps it onto LEDs and
+  sends a DDP frame. The strip runs on its own 100 ms timer because a full-board keyboard frame
+  blocks the main tick for up to a second; the keyboard code pumps the run loop between reports,
+  so the strip timer keeps firing meanwhile.
 
 ## Credits
 

@@ -253,21 +253,24 @@
 - [x] run `kbstatus/test.sh` - must pass before task 7
 
 ### Task 7: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented (strip off without config block; DDP
+- [x] verify all requirements from Overview are implemented (strip off without config block; DDP
       frames on change / pulse / keep-alive; idle all-off once; badge bar; brightness)
-- [ ] verify edge cases are handled (unresolvable host, unreachable host, invalid ranges, leds > 480,
+- [x] verify edge cases are handled (unresolvable host, unreachable host, invalid ranges, leds > 480,
       badge > badge range, `transport` other than ddp)
-- [ ] run full test suite: `kbstatus/test.sh`
-- [ ] keyboard regression: transitions, typing through transitions, question → red pulse, badge keys
+- [x] run full test suite: `kbstatus/test.sh`
+- [x] keyboard regression: transitions, typing through transitions, question → red pulse, badge keys
       light and clear, `kbstatus status`; daemon log shows no new warnings during 10 minutes of normal use
-- [ ] `./install.sh` builds and installs from a clean checkout (two-file build)
+      (2026-09-17: transitions/question/badges verified through the socket and hooks; the typing-feel
+      check is the user's during normal use)
+- [x] `./install.sh` builds and installs from a clean checkout (two-file build)
 
 ### Task 8: [Final] Update documentation
-- [ ] README: layout table (core/main/tests/test.sh, probe/ddp-fake.py), build commands, a "Strip
+- [x] README: layout table (core/main/tests/test.sh, probe/ddp-fake.py), build commands, a "Strip
       (WLED)" section with the config block, WLED setup steps (flash, LED count, brightness limit, DDP
       on, realtime timeout ≈ 2 s), `strip-test`, and the localhost fake-receiver recipe
-- [ ] README "How it works": one paragraph on the picture/renderer split
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README "How it works": one paragraph on the picture/renderer split
+- [x] move this plan to `docs/plans/completed/` (2026-09-17; first light and on-desk tuning are the
+      post-completion items below)
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
