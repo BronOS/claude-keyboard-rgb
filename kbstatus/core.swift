@@ -178,3 +178,14 @@ func ddpFrame(_ colors: [RGB], sequence: UInt8) -> [[UInt8]] {
     let starts = stride(from: 0, to: colors.count, by: per)
     return starts.map { s in ddpPacket(colors[s ..< min(s + per, colors.count)], offset: s, sequence: sequence, push: s + per >= colors.count) }
 }
+
+/// Whether the strip needs a packet now. `changed`: the colors differ from the last frame sent
+/// (a pulse changes every tick, so animation needs no special case); `dark`: nothing to show
+/// (idle without badges) - sent once when it changes, then silence so WLED's realtime timeout
+/// keeps the strip dark; otherwise a keep-alive every `keepAlive` seconds so WLED stays in
+/// realtime mode while a solid state is shown.
+func shouldSendStrip(changed: Bool, dark: Bool, elapsed: Double, keepAlive: Double) -> Bool {
+    if changed { return true }
+    if dark { return false }
+    return elapsed >= keepAlive
+}

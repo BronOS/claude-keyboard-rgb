@@ -200,5 +200,15 @@ do {
     check(big.allSatisfy { $0[1] == 2 }, "all packets of a frame share the sequence number")
 }
 
+// MARK: strip send decision
+do {
+    check(shouldSendStrip(changed: true, dark: false, elapsed: 0, keepAlive: 1), "a changed frame is sent at once")
+    check(shouldSendStrip(changed: true, dark: true, elapsed: 0, keepAlive: 1), "going dark is sent once")
+    check(!shouldSendStrip(changed: false, dark: true, elapsed: 5, keepAlive: 1), "dark and unchanged: silence, whatever the elapsed time")
+    check(!shouldSendStrip(changed: false, dark: false, elapsed: 0.5, keepAlive: 1), "solid state, unchanged, before the keep-alive: no packet")
+    check(shouldSendStrip(changed: false, dark: false, elapsed: 1.0, keepAlive: 1), "solid state: keep-alive at the interval")
+    check(shouldSendStrip(changed: false, dark: false, elapsed: 3, keepAlive: 2.5), "keep-alive honours the configured interval")
+}
+
 print("\(checks) checks, \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

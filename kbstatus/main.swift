@@ -64,6 +64,8 @@ struct UserConfig {
     var badgePollSeconds = 2.0
     var agtermctlPath = "/opt/homebrew/bin/agtermctl"
     var vendorID = 0x3554, productID = 0xFA07
+    var strip: StripConfig? = nil         // the "strip" block (WLED over DDP); nil = no strip output
+    var stripError: String? = nil         // why the strip block was rejected, if it was
 
     static func load() -> UserConfig {
         var c = UserConfig()
@@ -100,6 +102,8 @@ struct UserConfig {
         if let v = j["badgePollSeconds"] as? Double { c.badgePollSeconds = max(0.5, v) }
         if let v = j["agtermctlPath"] as? String { c.agtermctlPath = v }
         if let v = j["workingStyle"] as? String { c.workingStyle = v }
+        if let sj = j["strip"] as? [String: Any] { let (sc, e) = StripConfig.parse(sj); c.strip = sc; c.stripError = e }
+        else if j["strip"] != nil { c.stripError = "strip must be an object" }
         return c
     }
     var effectiveWorkingStyle: String { workingStyle ?? (productID == 0xFA08 ? "static" : "pulse") }
@@ -284,6 +288,71 @@ func readConfigFromKeyboard(maxTries: Int = 12) -> [[UInt8]]? {
     return full
 }
 
+// MARK: - strip output (WLED over DDP) ------------------------------------------------------
+// Fire-and-forget UDP to a WLED board: no acknowledgement, no retries. A missing board costs one
+// log line at startup; a lost packet is repaired by the next keep-alive.
+
+final class StripSender {
+    let cfg: StripConfig
+    private var fd: Int32 = -1
+    private var addr: [UInt8] = []
+    private var addrLen: socklen_t = 0
+    private var seq: UInt8 = 1
+    private var resolved = false, lastResolve = 0.0, sendErrorLogged = false
+    private(set) var packets = 0
+    var target = "unresolved"
+
+    init(_ c: StripConfig) { cfg = c; resolve() }
+    private func resolve() {
+        lastResolve = CFAbsoluteTimeGetCurrent(); resolved = false
+        var hints = addrinfo(); hints.ai_socktype = SOCK_DGRAM; hints.ai_family = AF_UNSPEC
+        var res: UnsafeMutablePointer<addrinfo>? = nil
+        let r = getaddrinfo(cfg.host, String(cfg.port), &hints, &res)
+        guard r == 0, let ai = res else { log("strip: cannot resolve \(cfg.host): \(String(cString: gai_strerror(r)))"); return }
+        defer { freeaddrinfo(res) }
+        if fd >= 0 { close(fd) }
+        fd = socket(ai.pointee.ai_family, SOCK_DGRAM, 0)
+        guard fd >= 0 else { log("strip: socket failed: \(String(cString: strerror(errno)))"); return }
+        addrLen = ai.pointee.ai_addrlen
+        addr = Array(UnsafeBufferPointer(start: UnsafeRawPointer(ai.pointee.ai_addr).assumingMemoryBound(to: UInt8.self), count: Int(addrLen)))
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        getnameinfo(ai.pointee.ai_addr, ai.pointee.ai_addrlen, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+        target = String(cString: host); resolved = true
+        log("strip: \(cfg.host) -> \(target):\(cfg.port), \(cfg.leds) LEDs, status \(cfg.statusRange), badges \(cfg.badgeRange.map { "\($0)" } ?? "none"), brightness \(cfg.brightness)")
+    }
+    /// One frame. On a send error, log once and re-resolve no sooner than 60 s later.
+    func send(_ colors: [RGB]) {
+        if !resolved { if CFAbsoluteTimeGetCurrent() - lastResolve > 60 { resolve() }; if !resolved { return } }
+        for pkt in ddpFrame(colors, sequence: seq) {
+            let n = addr.withUnsafeBytes { a in pkt.withUnsafeBytes { b in
+                sendto(fd, b.baseAddress, b.count, 0, a.baseAddress!.assumingMemoryBound(to: sockaddr.self), addrLen) } }
+            if n < 0 {
+                if !sendErrorLogged { log("strip: send to \(target) failed: \(String(cString: strerror(errno)))"); sendErrorLogged = true }
+                resolved = false; lastResolve = CFAbsoluteTimeGetCurrent(); return
+            }
+            packets += 1
+        }
+        sendErrorLogged = false
+        seq = seq >= 15 ? 1 : seq + 1
+    }
+}
+var strip: StripSender? = nil
+var stripLastSend = 0.0, stripLastColors: [UInt8] = []
+let stripStatusColors = StatusColors(working: cfg.working, done: cfg.done, attention: cfg.attention, badge: cfg.badgeColor)
+let stripFps = 10.0   // the tick rate
+
+/// Runs on its own 100 ms timer, not from tick(): a full-board keyboard frame blocks tick() for up
+/// to a second, and the keyboard code pumps the run loop between reports, so this timer keeps
+/// firing while the keyboard is busy.
+func renderStrip(_ pic: Picture) {
+    guard let s = strip else { return }
+    let colors = stripColors(pic, s.cfg, stripStatusColors, floor: cfg.pulseFloor, fps: stripFps)
+    let flat = colors.flatMap { [$0.0, $0.1, $0.2] }
+    let dark = pic.status == .idle && pic.badge == 0
+    guard shouldSendStrip(changed: flat != stripLastColors, dark: dark, elapsed: pic.t - stripLastSend, keepAlive: s.cfg.keepAliveSeconds) else { return }
+    s.send(colors); stripLastSend = pic.t; stripLastColors = flat
+}
+
 // MARK: - state ----------------------------------------------------------------------------
 
 var sessions: [String: SessionState] = [:]
@@ -405,9 +474,7 @@ func tick() {
     stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
     for c in cmds { handle(c) }
     if stopRequested { CFRunLoopStop(CFRunLoopGetMain()); return }
-    guard device != nil, !linkAsleep(), ensurePerKeyMode() else { return }
-    let pic = currentPicture()
-    renderKeyboard(pic)
+    if device != nil, !linkAsleep(), ensurePerKeyMode() { renderKeyboard(currentPicture()) }
 }
 /// Keyboard renderer: paints the picture with 0x88 overlays (see the design note at the top of the file).
 func renderKeyboard(_ pic: Picture) {
@@ -464,7 +531,7 @@ func handle(_ line: String) {
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
+    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\nstrip: \(strip.map { "\($0.cfg.host) (\($0.target)) \($0.cfg.leds) LEDs, \($0.packets) packets, last \(stripLastSend > 0 ? String(format: "%.1f s ago", CFAbsoluteTimeGetCurrent() - stripLastSend) : "never")" } ?? (cfg.stripError.map { "disabled: \($0)" } ?? "off"))\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\n"
     for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
 }
@@ -567,11 +634,17 @@ case "daemon":
     let mgr = startHIDManager(onArrive: true)
     let typing = startTypingMonitor()
     startBadgePoller()
+    if let sc = cfg.strip { strip = StripSender(sc) } else if let e = cfg.stripError { log("strip: disabled: \(e)") }
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
     CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
+    let stripTimer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.25, 1.0 / stripFps, 0, 0) { _ in
+        if !stopRequested { renderStrip(currentPicture()) }
+    }
+    if strip != nil { CFRunLoopAddTimer(CFRunLoopGetMain(), stripTimer, CFRunLoopMode.defaultMode) }
     CFRunLoopRun()
     // stopping: leave the board in idle colors
     if device != nil { _ = sendAll(overlayFrames([])) }   // keys fall back to the black map
+    strip?.send([RGB](repeating: (0, 0, 0), count: cfg.strip?.leds ?? 0))   // strip dark
     unlink(sockPath); _ = mgr; _ = typing; log("daemon stopped")
 case "restore":
     // Write the keyboard's original (cached) config back. Not saved to flash. Stop the daemon first.
@@ -599,6 +672,22 @@ case "map":     // map r g b | map off  — write a per-key map: indicator keys 
 case "clear":   // send the 0x88 idle frame (hands the keys back to the per-key map)
     _ = startHIDManager(onArrive: false); guard device != nil else { print("keyboard not found"); exit(1) }
     print(sendAll(overlayFrames([])) ? "idle frame sent" : "failed"); pump(0.3)
+case "strip-test":   // strip-test [secs per step] — sweep red, green, blue, then the badge pattern (no daemon needed; stop it first or it also sends)
+    guard let sc = cfg.strip else { print("no strip block in \(userConfigPath)\(cfg.stripError.map { ": \($0)" } ?? "")"); exit(1) }
+    let step = Double(args.count > 1 ? args[1] : "1") ?? 1
+    let sender = StripSender(sc); print("strip: \(sc.host) -> \(sender.target):\(sc.port), \(sc.leds) LEDs")
+    func show(_ colors: [RGB], _ label: String) { print("  \(label)"); sender.send(colors); usleep(UInt32(step * 1_000_000)) }
+    for (name, c) in [("red", (255, 0, 0)), ("green", (0, 255, 0)), ("blue", (0, 0, 255))] as [(String, RGB)] {
+        show([RGB](repeating: scaled(c, sc.brightness), count: sc.leds), "\(name) on all \(sc.leds) LEDs")
+    }
+    if let br = sc.badgeRange {
+        for n in 1...br.count {
+            let pic = Picture(status: .idle, style: "static", badge: n, t: 0)
+            show(stripColors(pic, sc, stripStatusColors, floor: cfg.pulseFloor), "badge \(n) of \(br.count)")
+        }
+    }
+    show([RGB](repeating: (0, 0, 0), count: sc.leds), "off")
+    print("sent \(sender.packets) packets")
 case "read-config":
     _ = startHIDManager(onArrive: false)
     guard device != nil else { print("keyboard not found"); exit(1) }
@@ -613,6 +702,7 @@ default:
       kbstatus restore                           stop daemon and write the keyboard's original config back
       kbstatus read-config                       re-read config fragments from the keyboard
       kbstatus daemon                            run the daemon in the foreground
+      kbstatus strip-test [secs]                 sweep colors over the WLED strip (config "strip" block); daemon must be stopped
     config: \(userConfigPath)   log: \(logPath)
     """)
 }

@@ -206,22 +206,22 @@
 **Files:**
 - Modify: `kbstatus/main.swift`, `kbstatus/core.swift` (only if a helper turns out pure), `kbstatus/tests/main.swift`
 
-- [ ] parse the `strip` block in `UserConfig.load()` into `var strip: StripConfig?`; log the parse reason
+- [x] parse the `strip` block in `UserConfig.load()` into `var strip: StripConfig?`; log the parse reason
       and leave `strip` nil when invalid
-- [ ] add `StripSender` (main): `getaddrinfo` resolution of `host:port`, `socket`/`sendto`, sequence
+- [x] add `StripSender` (main): `getaddrinfo` resolution of `host:port`, `socket`/`sendto`, sequence
       counter, one-time error log and re-resolve no sooner than 60 s after a failed send
-- [ ] add `renderStrip(_ p: Picture)` to `tick()` after the keyboard branch, gated on `cfg.strip`:
+- [x] add `renderStrip(_ p: Picture)` to `tick()` after the keyboard branch, gated on `cfg.strip`:
       compute `stripColors`, build a key (status, style, badge, level quantized to 1/64); send when the
       key changed, or style is pulse/blink and ≥ 100 ms since the last send, or ≥ `keepAliveSeconds`
       since the last send while a non-idle state is shown; idle sends once on change only
-- [ ] the keyboard branch's early `return`s must not skip the strip: restructure `tick()` so the
+- [x] the keyboard branch's early `return`s must not skip the strip: restructure `tick()` so the
       keyboard renderer is a function returning early on its own, then the strip renderer runs
-- [ ] `kbstatus status` prints the strip line; daemon startup logs `strip: <host> resolved to <ip>,
+- [x] `kbstatus status` prints the strip line; daemon startup logs `strip: <host> resolved to <ip>,
       <N> LEDs` or the parse/resolve failure
-- [ ] write tests for the pure parts: the send-decision function (`shouldSendStrip(prev:now:style:
+- [x] write tests for the pure parts: the send-decision function (`shouldSendStrip(prev:now:style:
       elapsed:keepAlive:)`) covering change/pulse/keep-alive/idle cases; `UserConfig`-level parse of a
       dict with and without a `strip` block (extract the block parsing into a pure function if needed)
-- [ ] run `kbstatus/test.sh` - must pass; rebuild, reinstall, confirm the keyboard still behaves and
+- [x] run `kbstatus/test.sh` - must pass; rebuild, reinstall, confirm the keyboard still behaves and
       that with no `strip` block nothing new is logged or sent, before task 6
 
 ### Task 6: Fake WLED receiver and the strip-test command
@@ -230,20 +230,27 @@
 - Create: `probe/ddp-fake.py`
 - Modify: `kbstatus/main.swift`, `README.md` (probe table)
 
-- [ ] write `probe/ddp-fake.py`: binds UDP 4048 (port via `--port`), parses the DDP header, validates
+- [x] write `probe/ddp-fake.py`: binds UDP 4048 (port via `--port`), parses the DDP header, validates
       version/push flags, offset 0 and `length == payload size`, prints each frame as one line of
       ANSI 24-bit colored blocks with the sequence number and time since the previous packet; `--leds N`
       warns when the LED count differs; exits on Ctrl-C
-- [ ] add `kbstatus strip-test [secs]`: standalone (no daemon), reads the `strip` block, sweeps red,
+- [x] add `kbstatus strip-test [secs]`: standalone (no daemon), reads the `strip` block, sweeps red,
       green, blue across all LEDs, then a badge pattern (badge LEDs 1…N), one frame per second, and
       prints the packet count
-- [ ] end-to-end on localhost: `strip` block with `"host": "127.0.0.1"`, run `probe/ddp-fake.py`, run
+- [x] end-to-end on localhost: `strip` block with `"host": "127.0.0.1"`, run `probe/ddp-fake.py`, run
       `kbstatus strip-test 6`, then restart the daemon and drive `SET exp working|done|attention|end`
       through the socket; confirm frames, pulse rate (~10 fps), keep-alive cadence (~1 s) and that idle
       sends exactly one all-off packet
-- [ ] write tests: none new in Swift for this task beyond keeping Task 5's passing; the fake receiver's
+- [x] write tests: none new in Swift for this task beyond keeping Task 5's passing; the fake receiver's
       validation is exercised by the end-to-end run (record the observed output in this plan)
-- [ ] run `kbstatus/test.sh` - must pass before task 7
+      ➕ observed 2026-09-17 (hooks paused, states driven via the socket, 3 s each): attention and
+      working pulses = 54 packets at ~100 ms + 6 at ~200 ms (identical consecutive frames are skipped),
+      done = keep-alives at ~1 s, idle = one packet then silence; all packets valid (no WARN), sequence
+      1..15 wrapping. `strip-test` sweep = 14 valid packets.
+      ⚠️ found and fixed: with the strip rendered from tick(), a full-board keyboard frame (7 BT reports,
+      ~1 s) starved it to ~1 packet/s during attention. The strip now has its own 100 ms CFRunLoopTimer,
+      which fires inside the keyboard code's run-loop pumps.
+- [x] run `kbstatus/test.sh` - must pass before task 7
 
 ### Task 7: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (strip off without config block; DDP
