@@ -262,7 +262,10 @@ func startHIDManager(onArrive: Bool) -> IOHIDManager {
     let mgr = IOHIDManagerCreate(kCFAllocatorDefault, 0)
     IOHIDManagerSetDeviceMatching(mgr, [kIOHIDVendorIDKey: cfg.vendorID, kIOHIDProductIDKey: cfg.productID] as CFDictionary)
     if onArrive {
-        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { _, _, _, d in if device == nil, usagePage(d) == 0xFF00 { _ = openDevice(d) } }, nil)
+        // Reconnect: take whatever collection arrives. The BT-classic F87 Pro exposes only the keyboard
+        // collection (page 1), so requiring the vendor page here left the daemon deaf after the first
+        // disconnect. pickDevice() still prefers the vendor collection when several are present at startup.
+        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { _, _, _, d in if device == nil { log("device arrived (usage page \(String(format: "0x%04x", usagePage(d))))"); _ = openDevice(d) } }, nil)
         IOHIDManagerRegisterDeviceRemovalCallback(mgr, { _, _, _, d in
             if let cur = device, cur == d { IOHIDDeviceUnscheduleFromRunLoop(cur, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue); device = nil; log("device removed") }
         }, nil)
