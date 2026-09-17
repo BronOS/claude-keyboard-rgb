@@ -148,12 +148,13 @@ acknowledgement, no retries; a lost packet is repaired by the next frame.
   "statusRange": [0, 49],
   "badgeRange": [50, 59],
   "brightness": 0.6,
+  "badgeWidth": 1,
   "keepAliveSeconds": 1.0
 }
 ```
 
-`statusRange` shows the state color (pulsing like the keyboard); `badgeRange` lights one LED per
-agterm badge (see below) from its start; other LEDs stay off. Both default to the whole strip and
+`statusRange` shows the state color (pulsing like the keyboard); `badgeRange` lights `badgeWidth`
+LEDs per agterm badge (see below) from its start; other LEDs stay off. Both default to the whole strip and
 none. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's own sender).
 `host` is an IP or DNS name; mDNS `.local` names do not cross VLANs, so give the board a DHCP
 reservation. Remove the block to turn the strip off; the keyboard never depends on it.

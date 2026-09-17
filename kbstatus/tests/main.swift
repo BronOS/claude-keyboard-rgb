@@ -176,6 +176,13 @@ do {
     var dim = cfg; dim.brightness = 0.5
     let half = stripColors(pic(.done, "static", badge: 1), dim, colors, floor: 0.25)
     check(eq(half[0], (0, 128, 20)) && eq(half[7], (128, 60, 0)), "brightness 0.5 halves status and badge colors, got \(half[0]) \(half[7])")
+    var wide = cfg; wide.badgeWidth = 3
+    let w2 = stripColors(pic(.idle, "static", badge: 1), wide, colors, floor: 0.25)
+    check(eq(w2[7], (255, 120, 0)) && eq(w2[8], (255, 120, 0)) && eq(w2[9], (255, 120, 0)), "badgeWidth 3: one badge lights three LEDs")
+    let w3 = stripColors(pic(.idle, "static", badge: 2), wide, colors, floor: 0.25)
+    check((7...9).allSatisfy { eq(w3[$0], (255, 120, 0)) } && w3.count == 10, "badgeWidth: capped to the badge range")
+    let (bw, _) = StripConfig.parse(["host": "h", "leds": 10, "badgeWidth": 2]); check(bw?.badgeWidth == 2, "badgeWidth parses")
+    let (bwBad, bwErr) = StripConfig.parse(["host": "h", "leds": 10, "badgeWidth": 0]); check(bwBad == nil && bwErr != nil, "badgeWidth 0 rejected")
     let noBadgeRange = StripConfig(host: "h", leds: 5, statusRange: 0...2, badgeRange: nil, brightness: 1)
     let nb = stripColors(pic(.done, "static", badge: 3), noBadgeRange, colors, floor: 0.25)
     check(eq(nb[3], (0, 0, 0)) && eq(nb[4], (0, 0, 0)), "without a badge range, badges are not drawn and spare LEDs stay off")

@@ -100,6 +100,7 @@ struct StripConfig {
     var statusRange: ClosedRange<Int>          // LEDs that show the status color
     var badgeRange: ClosedRange<Int>? = nil    // LEDs that show the agterm badge count, one per badge from the start
     var brightness: Double = 0.6               // 0...1, scales every color
+    var badgeWidth = 1                         // LEDs per badge (dense strips: 2-3 make a badge readable)
     var keepAliveSeconds: Double = 1.0         // re-send a solid state this often (WLED leaves realtime mode after its timeout)
     var transport = "ddp"                      // only "ddp" for now; "serial" is reserved
 
@@ -121,6 +122,7 @@ struct StripConfig {
         var c = StripConfig(host: host, leds: leds, statusRange: status, badgeRange: br)
         if let p = j["port"] as? Int { guard p >= 1, p <= 65535 else { return (nil, "strip.port out of range") }; c.port = UInt16(p) }
         if let b = j["brightness"] as? Double { c.brightness = max(0, min(1, b)) }
+        if let w = j["badgeWidth"] as? Int { guard w >= 1 else { return (nil, "strip.badgeWidth must be >= 1") }; c.badgeWidth = w }
         if let k = j["keepAliveSeconds"] as? Double { c.keepAliveSeconds = max(0.2, k) }
         if let t = j["transport"] as? String { c.transport = t }
         guard c.transport == "ddp" else { return (nil, "strip.transport \"\(c.transport)\" not supported (only ddp)") }
@@ -147,7 +149,7 @@ func stripColors(_ p: Picture, _ cfg: StripConfig, _ colors: StatusColors, floor
         for i in cfg.statusRange { out[i] = lit }
     }
     if let br = cfg.badgeRange, p.badge > 0 {
-        for i in br.lowerBound ..< br.lowerBound + min(p.badge, br.count) { out[i] = colors.badge }
+        for i in br.lowerBound ..< br.lowerBound + min(p.badge * cfg.badgeWidth, br.count) { out[i] = colors.badge }
     }
     return cfg.brightness == 1 ? out : out.map { scaled($0, cfg.brightness) }
 }
