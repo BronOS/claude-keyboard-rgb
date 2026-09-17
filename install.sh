@@ -20,7 +20,7 @@ PY
 fi
 
 command -v xcrun >/dev/null && xcrun swiftc --version >/dev/null 2>&1 || { echo "swiftc missing: run 'xcode-select --install' first"; exit 1; }
-echo "building..."; (cd kbstatus && xcrun swiftc -O -o kbstatus kbstatus.swift)
+echo "building..."; (cd kbstatus && xcrun swiftc -O -o kbstatus core.swift main.swift)
 mkdir -p "$HOME/.local/bin" "$HOME/.config/kbstatus"
 # replace by rename: overwriting a running signed binary in place gets new invocations killed by macOS
 cp kbstatus/kbstatus "$BIN.new" && mv -f "$BIN.new" "$BIN"; echo "installed $BIN"

@@ -8,7 +8,9 @@ orange when it is waiting for a permission decision.
 
 | Path | Purpose |
 |------|---------|
-| `kbstatus/kbstatus.swift` | daemon + hook client (single binary, IOKit HID, no dependencies) |
+| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID, no dependencies) |
+| `kbstatus/core.swift` | pure protocol code shared by the daemon and the tests (frames, key map, state types) |
+| `kbstatus/tests/main.swift`, `kbstatus/test.sh` | assert-based tests: `kbstatus/test.sh` builds and runs them |
 | `probe/kbtest.swift` | protocol experiment tool (`read`, `experiment`, `perkey`, `effect`, `stream`) |
 | `probe/hidprobe2.swift` | first minimal probe |
 | `docs/research/` | protocol findings for the F87 Pro over BLE, with links to the upstream research |
@@ -25,7 +27,7 @@ Needs Xcode Command Line Tools (`xcode-select --install`). Manual build, if you 
 
 ```sh
 cd kbstatus
-xcrun swiftc -O -o kbstatus kbstatus.swift
+xcrun swiftc -O -o kbstatus core.swift main.swift
 cp kbstatus ~/.local/bin/kbstatus.new && mv -f ~/.local/bin/kbstatus.new ~/.local/bin/kbstatus
 kbstatus stop   # the next hook call starts the new daemon
 ```
@@ -126,7 +128,7 @@ a brief blink every half minute or so. `streamGapMs` (pacing between a frame's f
 default = `echoWaitMs`) and `overlayRefreshSeconds` are the knobs; 100 ms / 1.5 s and
 60 ms / 1.0 s both still blink occasionally on this link.
 
-Key names are the lowercase labels from the key map in `kbstatus.swift` (`keyLED`)
+Key names are the lowercase labels from the key map in `core.swift` (`keyLED`)
 (`esc`, `f1`…`f12`, `w`, `a`, `s`, `d`, `space`, `enter`, `up`, …). Restart the daemon
 (`kbstatus stop`) after editing.
 

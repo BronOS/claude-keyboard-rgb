@@ -133,23 +133,25 @@
 - Rename: `kbstatus/kbstatus.swift` → `kbstatus/main.swift`
 - Modify: `install.sh`, `README.md`, `.gitignore` (test binary lives in `$TMPDIR`, nothing to ignore)
 
-- [ ] `git mv kbstatus/kbstatus.swift kbstatus/main.swift`; move to `core.swift`: `RGB`, `keyLED`,
+- [x] `git mv kbstatus/kbstatus.swift kbstatus/main.swift`; move to `core.swift`: `RGB`, `keyLED`,
       `checksummed`, `frame`, `perKeyFrames`, `overlayFrames`, `scaled`, `Status`, `SessionState`
       (declarations only; `cfg`, sockets, HID, logging stay in `main.swift`)
-- [ ] update the build line in `install.sh` and both build mentions in `README.md` to
+- [x] update the build line in `install.sh` and both build mentions in `README.md` to
       `xcrun swiftc -O -o kbstatus core.swift main.swift`; update the README layout table
-- [ ] create `kbstatus/test.sh` (compile `core.swift tests/main.swift` into `$TMPDIR/kbstatus-tests`, run it,
+- [x] create `kbstatus/test.sh` (compile `core.swift tests/main.swift` into `$TMPDIR/kbstatus-tests`, run it,
       exit non-zero on failure) and `kbstatus/tests/main.swift` with a tiny `check(_:_:)` helper that
       counts failures and exits 1
-- [ ] write tests pinning the keyboard protocol: `checksummed` (sum mod 256 into byte 19), `frame`
+- [x] write tests pinning the keyboard protocol: `checksummed` (sum mod 256 into byte 19), `frame`
       layout (report id 0x13, cmd/sub/seq, payload cap 15), `perKeyFrames` (28 frames, R/G/B planes,
       trailer `06 00 00 5A A5`), `overlayFrames` (13 F-row keys → 2 fragments with byte 4 = 0x1E then
       0x10+len; empty list → the idle frame `13 88 01 00 23 … bf`; 87 keys one color → 7 fragments;
       two colors → two groups sorted by count), `scaled` (clamping and rounding)
-- [ ] write edge-case tests: `overlayFrames` with all-black colors yields the idle frame; more than 14
+- [x] write edge-case tests: `overlayFrames` with all-black colors yields the idle frame; more than 14
       fragments are truncated to 14; `frame` with an over-long payload keeps 15 bytes
-- [ ] run `kbstatus/test.sh` - must pass; rebuild and reinstall the daemon (rename, not cp) and run the
+- [x] run `kbstatus/test.sh` - must pass; rebuild and reinstall the daemon (rename, not cp) and run the
       manual keyboard regression checks - behaviour must be identical before task 2
+      (2026-09-17: 100 checks pass; socket transitions working/done/attention/idle logged as before;
+      typing/visual check pending with the user)
 
 ### Task 2: Introduce Picture and the pulse math
 
