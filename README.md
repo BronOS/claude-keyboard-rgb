@@ -8,7 +8,7 @@ orange when it is waiting for a permission decision.
 
 | Path | Purpose |
 |------|---------|
-| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID, no dependencies) |
+| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID + optional built-in backlight, no dependencies) |
 | `kbstatus/core.swift` | pure protocol code shared by the daemon and the tests (frames, key map, state types) |
 | `kbstatus/tests/main.swift`, `kbstatus/test.sh` | assert-based tests: `kbstatus/test.sh` builds and runs them |
 | `probe/ddp-fake.py` | fake WLED receiver: validates DDP packets on UDP 4048 and draws the strip in the terminal |
@@ -170,6 +170,35 @@ effect whenever the daemon stops sending. Then:
 kbstatus stop; kbstatus strip-test          # red, green, blue sweep + badge pattern, 1 s each
 python3 probe/ddp-fake.py --leds 60         # with "host": "127.0.0.1": see the frames on the Mac
 ```
+
+## MacBook built-in keyboard backlight (optional)
+
+The Mac's own keyboard backlight can follow the same states through the private CoreBrightness
+`KeyboardBrightnessClient` API. It has no color, so states differ by rhythm: **working** breathes
+(3 s period, gamma curve, full range), **attention** blinks on/off at 1 Hz, **done** is steady
+bright, and idle hands the backlight back (original level and auto-brightness restored). Local
+calls, so it costs nothing on the Bluetooth link, and it works with the AULA board absent.
+Typing on any non-AULA keyboard clears the done state too.
+
+```json
+{
+  "builtinBacklight": true,
+  "builtinWorkingStyle": "breathe",
+  "builtinAttentionStyle": "blink",
+  "builtinBreatheSeconds": 3,
+  "builtinBlinkHz": 1,
+  "builtinFps": 30,
+  "builtinLevel": 1.0,
+  "builtinFloor": 0
+}
+```
+
+- `builtinWorkingStyle`: `breathe` | `static` (steady at `builtinLevel`) | `off` (leave the backlight alone while working).
+- `builtinAttentionStyle`: `blink` | `breathe` (at `builtinBlinkHz`).
+- A breathe period under ~2 s is too subtle: the backlight smooths fast changes, and a linear ramp
+  spends most of its time in the bright half where levels look alike. Keep the gamma curve and 3 s.
+- Private API: the daemon looks it up at runtime and logs `built-in backlight: ... not available`
+  if a macOS release removes it; the AULA path is unaffected. Verified on macOS 26/27, Apple Silicon.
 
 ## agterm badges on the number row (optional)
 
