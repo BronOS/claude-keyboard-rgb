@@ -205,6 +205,59 @@ Typing on any non-AULA keyboard clears the done state too.
 - Private API: the daemon looks it up at runtime and logs `built-in backlight: ... not available`
   if a macOS release removes it; the AULA path is unaffected. Verified on macOS 26/27, Apple Silicon.
 
+### Driving the strip from a second Mac
+
+Any Mac that can reach the board can send the frames; nothing on the board is tied to a sender.
+Steps on the other machine:
+
+```sh
+git pull && ./install.sh          # two-file build now: core.swift + main.swift
+kbstatus stop                     # the next hook call starts the new daemon
+```
+
+then add the same `strip` block to its `~/.config/kbstatus/config.json` (the board's IP, LED count,
+ranges) and restart the daemon. Keyboard-side settings stay per machine (the BLE-paired F87 Pro
+needs none of the BT-classic knobs).
+
+One sender at a time: WLED shows whichever packet arrived last and does not merge sources, so two
+daemons streaming at once make the strip flicker between their pictures. That is fine when only
+one Mac is in use (an idle daemon sends nothing). If both are ever active together, either give
+each Mac its own `statusRange` half of the strip, or add a priority rule; neither is built yet.
+
+### Reference config (BT-classic F87 Pro + 144-LED strip, Gledopto at 10.0.30.15)
+
+```json
+{
+  "productID": 64008,
+  "skipConfigWrite": true,
+  "echoWaitMs": 60,
+  "workingStyle": "pulse",
+  "streamFps": 3,
+  "skipBackgroundMap": true,
+  "solidKeys": "all",
+  "overlayRefreshSeconds": 1.5,
+  "streamGapMs": 60,
+  "attentionKeys": "all",
+  "agtermBadge": true,
+  "badgeCount": "notifications",
+  "strip": {
+    "host": "10.0.30.15",
+    "leds": 144,
+    "statusRange": [
+      0,
+      143
+    ],
+    "badgeRange": [
+      117,
+      143
+    ],
+    "badgeWidth": 3,
+    "brightness": 0.6,
+    "fps": 10
+  }
+}
+```
+
 ## agterm badges on the number row (optional)
 
 With `"agtermBadge": true` the daemon polls `agtermctl` every `badgePollSeconds` (2) and lights
