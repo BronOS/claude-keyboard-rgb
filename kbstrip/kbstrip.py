@@ -8,6 +8,10 @@ A port of the strip path of kbstatus (macOS) with no keyboard: same config block
 same pulse math, same DDP frames, so any machine can drive the same strip (WLED shows the last
 packet it received; one active sender at a time). Python 3.8+, standard library only.
 
+doneClearsOnTyping (default true): a key press on any keyboard in /dev/input clears done, like the
+macOS daemon does with the AULA board. Needs read access to /dev/input/event* (the "input" group);
+only the time of a press is kept, never the key.
+
 Config: ~/.config/kbstatus/config.json (the "strip" block plus the status colors / timeouts);
 KBSTRIP_CONFIG overrides the path. Log: ~/.cache/kbstrip (KBSTRIP_CACHE overrides); socket:
 $XDG_RUNTIME_DIR/kbstrip.sock, else ~/.cache/kbstrip/sock (KBSTRIP_SOCK overrides).
@@ -33,7 +37,7 @@ def log(s):
 
 DEFAULTS = dict(working=(0, 90, 255), done=(0, 255, 40), attention=(255, 0, 0), badgeColor=(255, 0, 0),
                 doneHoldSeconds=90.0, workingTimeoutMinutes=20.0, pulseFloor=0.25,
-                attentionStyle="pulse", workingStyle="pulse")
+                attentionStyle="pulse", workingStyle="pulse", doneClearsOnTyping=True)
 MAX_LEDS = 480
 
 
@@ -105,6 +109,8 @@ def load_config():
     for k in ("attentionStyle", "workingStyle"):
         if isinstance(j.get(k), str):
             cfg[k] = j[k]
+    if isinstance(j.get("doneClearsOnTyping"), bool):
+        cfg["doneClearsOnTyping"] = j["doneClearsOnTyping"]
     if "strip" in j:
         cfg["strip"], cfg["stripError"] = parse_strip(j["strip"])
     else:
@@ -212,6 +218,86 @@ class StripSender:
         self.seq = 1 if self.seq >= 15 else self.seq + 1
 
 
+# ---- typing monitor -------------------------------------------------------------------------------
+# Watches every keyboard in /dev/input (a device whose key bitmap has KEY_A) for key presses. Under
+# Moonlight the keys arrive through Sunshine's virtual keyboard, which comes and goes with the stream,
+# so devices are rescanned every few seconds.
+
+EVENT = struct.Struct("llHHi")   # struct input_event: timeval, type, code, value
+EV_KEY, KEY_A = 1, 30
+
+
+def keyboard_nodes(text):
+    """/dev/input/eventN paths of the keyboards listed in /proc/bus/input/devices."""
+    nodes = []
+    for block in text.split("\n\n"):
+        ev = key = None
+        for line in block.splitlines():
+            if line.startswith("H: Handlers="):
+                ev = next((h for h in line[12:].split() if h.startswith("event")), None)
+            elif line.startswith("B: KEY="):
+                key = line[7:].split()
+        if ev and key and int(key[-1], 16) >> KEY_A & 1:
+            nodes.append("/dev/input/" + ev)
+    return nodes
+
+
+class KeyWatch:
+    RESCAN = 5.0
+
+    def __init__(self):
+        self.fds, self.last_key, self.last_scan, self.denied = {}, 0.0, 0.0, set()   # fds: fd -> path
+
+    def scan(self):
+        self.last_scan = time.monotonic()
+        try:
+            with open("/proc/bus/input/devices") as f:
+                nodes = keyboard_nodes(f.read())
+        except OSError:
+            return
+        for fd, path in list(self.fds.items()):
+            if path not in nodes:
+                self.close(fd)
+        for path in set(nodes) - set(self.fds.values()):
+            try:
+                self.fds[os.open(path, os.O_RDONLY | os.O_NONBLOCK)] = path
+                log("typing monitor: watching %s (%s)" % (path, device_name(path)))
+            except OSError as e:
+                if path not in self.denied:
+                    self.denied.add(path)
+                    log("typing monitor: cannot open %s: %s" % (path, e))
+
+    def close(self, fd):
+        log("typing monitor: %s gone" % self.fds.pop(fd))
+        os.close(fd)
+
+    def poll_fds(self):
+        if time.monotonic() - self.last_scan > self.RESCAN:
+            self.scan()
+        return list(self.fds)
+
+    def read(self, fd):
+        try:
+            data = os.read(fd, EVENT.size * 64)
+        except BlockingIOError:
+            return
+        except OSError:
+            self.close(fd)
+            return
+        for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+            _, _, typ, _, value = EVENT.unpack_from(data, i)
+            if typ == EV_KEY and value == 1:
+                self.last_key = time.time()
+
+
+def device_name(path):
+    try:
+        with open("/sys/class/input/%s/device/name" % os.path.basename(path)) as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
 # ---- daemon ---------------------------------------------------------------------------------------
 
 class Daemon:
@@ -219,12 +305,16 @@ class Daemon:
         self.cfg, self.sessions, self.stop = cfg, {}, False   # sessions: id -> (status, since)
         self.strip = StripSender(cfg["strip"])
         self.last_send, self.last_colors, self.shown = 0.0, None, None
+        self.keys = KeyWatch() if cfg["doneClearsOnTyping"] else None
 
     def composite(self):
         now = time.time()
         for sid, (st, since) in list(self.sessions.items()):
             if st == "done" and now - since > self.cfg["doneHoldSeconds"]:
                 del self.sessions[sid]
+            elif st == "done" and self.keys and self.keys.last_key > since + 0.5:
+                del self.sessions[sid]
+                log("session %s done cleared by typing" % sid)
             elif st == "working" and now - since > self.cfg["workingTimeoutMinutes"] * 60:
                 del self.sessions[sid]
         states = {s for s, _ in self.sessions.values()}
@@ -255,6 +345,9 @@ class Daemon:
         t = "composite: %s\nshown: %s\nstrip: %s (%s) %d LEDs, %d packets, last %s\n" % (
             self.composite(), self.shown or "none", s.cfg["host"], s.target, s.cfg["leds"], s.packets,
             "%.1f s ago" % (time.monotonic() - self.last_send) if self.last_send else "never")
+        k = self.keys
+        t += "typing monitor: %s\n" % ("off" if not k else "%d keyboard(s), last key %s" % (
+            len(k.fds), "%.1f s ago" % (time.time() - k.last_key) if k.last_key else "never"))
         for sid, (st, since) in self.sessions.items():
             t += "  %s %s since %ds\n" % (sid, st, int(time.time() - since))
         return t
@@ -288,8 +381,11 @@ class Daemon:
         srv.listen(16)
         log("daemon starting (pid %d)" % os.getpid())
         while not self.stop:
-            ready, _, _ = select.select([srv], [], [], 0.1)
-            for s in ready:
+            key_fds = self.keys.poll_fds() if self.keys else []
+            ready, _, _ = select.select([srv] + key_fds, [], [], 0.1)
+            for fd in (r for r in ready if r is not srv):
+                self.keys.read(fd)
+            for s in (r for r in ready if r is srv):
                 conn, _ = s.accept()
                 try:
                     line = conn.recv(512).decode("utf-8", "replace").strip()

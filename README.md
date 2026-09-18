@@ -230,8 +230,11 @@ each Mac its own `statusRange` half of the strip, or add a priority rule; neithe
 A Linux machine (here: an Omarchy VM reached over Moonlight, keyboard attached to the Mac) can drive
 the strip with `kbstrip/kbstrip.py`: a port of the strip path only. Same hook verbs, same `strip`
 block, same colors, timeouts, pulse math and DDP frames, so the board cannot tell the senders apart.
-Python 3.8+, standard library only; no keyboard, no built-in backlight, no agterm badges. Without a
-keyboard there is no "done clears on typing"; done fades after `doneHoldSeconds`.
+Python 3.8+, standard library only; no keyboard, no built-in backlight, no agterm badges.
+`doneClearsOnTyping` (default true) works like on macOS: a key press on any keyboard in `/dev/input`
+(under Moonlight, Sunshine's `libvirtualhid Keyboard`) clears done. It needs the user in the `input`
+group (Omarchy's default); without it, done fades after `doneHoldSeconds`. Only the time of a press
+is kept, never the key.
 
 ```sh
 git clone https://github.com/BronOS/claude-keyboard-rgb.git ~/Projects/claude-keyboard
