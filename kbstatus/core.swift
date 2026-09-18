@@ -98,7 +98,7 @@ struct StripConfig {
     var port: UInt16 = 4048
     var leds: Int
     var statusRange: ClosedRange<Int>          // LEDs that show the status color
-    var badgeRange: ClosedRange<Int>? = nil    // LEDs that show the agterm badge count, one per badge from the start
+    var badgeRange: ClosedRange<Int>? = nil    // LEDs that show the agterm badge count from the start; may overlap statusRange (badges paint on top)
     var brightness: Double = 0.6               // 0...1, scales every color
     var badgeWidth = 1                         // LEDs per badge (dense strips: 2-3 make a badge readable)
     var fps: Double = 5                        // frames per second while a state pulses (a weak Wi-Fi link drops packets above ~5)
@@ -119,9 +119,7 @@ struct StripConfig {
         }
         let (sr, e1) = range("statusRange"); if let e = e1 { return (nil, e) }
         let (br, e2) = range("badgeRange"); if let e = e2 { return (nil, e) }
-        let status = sr ?? 0...(leds - 1)
-        if let b = br, status.overlaps(b) { return (nil, "strip.statusRange and strip.badgeRange overlap") }
-        var c = StripConfig(host: host, leds: leds, statusRange: status, badgeRange: br)
+        var c = StripConfig(host: host, leds: leds, statusRange: sr ?? 0...(leds - 1), badgeRange: br)
         if let p = j["port"] as? Int { guard p >= 1, p <= 65535 else { return (nil, "strip.port out of range") }; c.port = UInt16(p) }
         if let b = num("brightness") { c.brightness = max(0, min(1, b)) }
         if let w = j["badgeWidth"] as? Int { guard w >= 1 else { return (nil, "strip.badgeWidth must be >= 1") }; c.badgeWidth = w }

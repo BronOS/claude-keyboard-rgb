@@ -145,7 +145,7 @@ acknowledgement, no retries; a lost packet is repaired by the next frame.
 "strip": {
   "host": "192.168.30.42",
   "leds": 60,
-  "statusRange": [0, 49],
+  "statusRange": [0, 59],
   "badgeRange": [50, 59],
   "brightness": 0.6,
   "badgeWidth": 1,
@@ -155,8 +155,8 @@ acknowledgement, no retries; a lost packet is repaired by the next frame.
 ```
 
 `statusRange` shows the state color (pulsing like the keyboard); `badgeRange` lights `badgeWidth`
-LEDs per agterm badge (see below) from its start; other LEDs stay off. Both default to the whole strip and
-none. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's own sender).
+LEDs per agterm badge (see below) from its start, painting over the status color where the ranges
+overlap; LEDs in neither range stay off. Defaults: the whole strip, and no badge range. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's own sender).
 `fps` (1–10) paces pulse frames. `host` is an IP or DNS name; mDNS `.local` names do not cross
 VLANs, so give the board a DHCP reservation. Remove the block to turn the strip off; the keyboard
 never depends on it.
