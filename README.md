@@ -11,6 +11,7 @@ orange when it is waiting for a permission decision.
 | `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID + optional built-in backlight, no dependencies) |
 | `kbstatus/core.swift` | pure protocol code shared by the daemon and the tests (frames, key map, state types) |
 | `kbstatus/tests/main.swift`, `kbstatus/test.sh` | assert-based tests: `kbstatus/test.sh` builds and runs them |
+| `kbstrip/kbstrip.py`, `kbstrip/install.sh` | Linux: strip-only daemon + hook client (Python, standard library), same config block and DDP frames |
 | `probe/ddp-fake.py` | fake WLED receiver: validates DDP packets on UDP 4048 and draws the strip in the terminal |
 | `probe/kbtest.swift` | protocol experiment tool (`read`, `experiment`, `perkey`, `effect`, `stream`) |
 | `probe/hidprobe2.swift` | first minimal probe |
@@ -223,6 +224,30 @@ One sender at a time: WLED shows whichever packet arrived last and does not merg
 daemons streaming at once make the strip flicker between their pictures. That is fine when only
 one Mac is in use (an idle daemon sends nothing). If both are ever active together, either give
 each Mac its own `statusRange` half of the strip, or add a priority rule; neither is built yet.
+
+### Driving the strip from Linux (`kbstrip`)
+
+A Linux machine (here: an Omarchy VM reached over Moonlight, keyboard attached to the Mac) can drive
+the strip with `kbstrip/kbstrip.py`: a port of the strip path only. Same hook verbs, same `strip`
+block, same colors, timeouts, pulse math and DDP frames, so the board cannot tell the senders apart.
+Python 3.8+, standard library only; no keyboard, no built-in backlight, no agterm badges. Without a
+keyboard there is no "done clears on typing"; done fades after `doneHoldSeconds`.
+
+```sh
+git clone https://github.com/BronOS/claude-keyboard-rgb.git ~/Projects/claude-keyboard
+cd ~/Projects/claude-keyboard/kbstrip && ./install.sh   # installs ~/.local/bin/kbstrip, adds the hooks, seeds the config
+kbstrip strip-test                                      # red, green, blue, off
+kbstrip status                                          # daemon state; log in ~/.cache/kbstrip/daemon.log
+```
+
+Config is `~/.config/kbstatus/config.json` (see `kbstrip/config.example.json`); `kbstrip stop`
+after editing. The daemon starts on the first hook call, like on macOS; `pause` / `resume` work
+the same. The socket lives in `$XDG_RUNTIME_DIR`. The same one-sender rule applies: whichever
+machine sent the last packet owns the strip. A machine on another VLAN needs a firewall rule to
+the board: UDP to its IP, port 4048, nothing back.
+
+Test without the board: `probe/ddp-fake.py --leds 144` on the same machine with
+`"host": "127.0.0.1"`.
 
 ### Reference config (BT-classic F87 Pro + 144-LED strip, Gledopto at 10.0.30.15)
 
