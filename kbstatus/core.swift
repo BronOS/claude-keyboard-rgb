@@ -101,6 +101,7 @@ struct StripConfig {
     var badgeRange: ClosedRange<Int>? = nil    // LEDs that show the agterm badge count, one per badge from the start
     var brightness: Double = 0.6               // 0...1, scales every color
     var badgeWidth = 1                         // LEDs per badge (dense strips: 2-3 make a badge readable)
+    var fps: Double = 5                        // frames per second while a state pulses (a weak Wi-Fi link drops packets above ~5)
     var keepAliveSeconds: Double = 1.0         // re-send a solid state this often (WLED leaves realtime mode after its timeout)
     var transport = "ddp"                      // only "ddp" for now; "serial" is reserved
 
@@ -108,6 +109,7 @@ struct StripConfig {
 
     /// Parses the block; on rejection returns nil and the reason.
     static func parse(_ j: [String: Any]) -> (StripConfig?, String?) {
+        func num(_ k: String) -> Double? { (j[k] as? Double) ?? (j[k] as? Int).map(Double.init) }   // JSON numbers and Swift literals
         guard let host = j["host"] as? String, !host.isEmpty else { return (nil, "strip.host missing") }
         guard let leds = j["leds"] as? Int, leds >= 1, leds <= maxLeds else { return (nil, "strip.leds must be 1...\(maxLeds)") }
         func range(_ key: String) -> (ClosedRange<Int>?, String?) {
@@ -121,9 +123,10 @@ struct StripConfig {
         if let b = br, status.overlaps(b) { return (nil, "strip.statusRange and strip.badgeRange overlap") }
         var c = StripConfig(host: host, leds: leds, statusRange: status, badgeRange: br)
         if let p = j["port"] as? Int { guard p >= 1, p <= 65535 else { return (nil, "strip.port out of range") }; c.port = UInt16(p) }
-        if let b = j["brightness"] as? Double { c.brightness = max(0, min(1, b)) }
+        if let b = num("brightness") { c.brightness = max(0, min(1, b)) }
         if let w = j["badgeWidth"] as? Int { guard w >= 1 else { return (nil, "strip.badgeWidth must be >= 1") }; c.badgeWidth = w }
-        if let k = j["keepAliveSeconds"] as? Double { c.keepAliveSeconds = max(0.2, k) }
+        if let f = num("fps") { c.fps = max(1, min(10, f)) }
+        if let k = num("keepAliveSeconds") { c.keepAliveSeconds = max(0.2, k) }
         if let t = j["transport"] as? String { c.transport = t }
         guard c.transport == "ddp" else { return (nil, "strip.transport \"\(c.transport)\" not supported (only ddp)") }
         return (c, nil)

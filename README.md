@@ -149,6 +149,7 @@ acknowledgement, no retries; a lost packet is repaired by the next frame.
   "badgeRange": [50, 59],
   "brightness": 0.6,
   "badgeWidth": 1,
+  "fps": 5,
   "keepAliveSeconds": 1.0
 }
 ```
@@ -156,15 +157,19 @@ acknowledgement, no retries; a lost packet is repaired by the next frame.
 `statusRange` shows the state color (pulsing like the keyboard); `badgeRange` lights `badgeWidth`
 LEDs per agterm badge (see below) from its start; other LEDs stay off. Both default to the whole strip and
 none. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's own sender).
-`host` is an IP or DNS name; mDNS `.local` names do not cross VLANs, so give the board a DHCP
-reservation. Remove the block to turn the strip off; the keyboard never depends on it.
+`fps` (1–10) paces pulse frames. `host` is an IP or DNS name; mDNS `.local` names do not cross
+VLANs, so give the board a DHCP reservation. Remove the block to turn the strip off; the keyboard
+never depends on it.
 
 Board setup, once, in the WLED web page (or its JSON API): LED count and type (an RGBW strip: type
 SK6812 RGBW, auto-white "none"), a current limit for USB power (2500 mA for a 144-LED strip on a
 3 A USB supply), DDP receiver on (default), realtime timeout about 2500 ms (default), and, so that
 idle really is dark: Sync settings → "Force max brightness" for realtime on, then turn the board's
 own output off and make off the boot default (`def.on = false`). Otherwise WLED shows its own
-effect whenever the daemon stops sending. Then:
+effect whenever the daemon stops sending. On a sound-reactive build (Gledopto ships one) disable
+the AudioReactive usermod: its microphone FFT starved the board's network stack and made it drop
+half the packets at 10 fps, showing as a 2 s lag on state changes; with it off, 10 fps runs
+loss-free. Then:
 
 ```sh
 kbstatus stop; kbstatus strip-test          # red, green, blue sweep + badge pattern, 1 s each

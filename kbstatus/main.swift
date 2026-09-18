@@ -357,20 +357,22 @@ final class StripSender {
     }
 }
 var strip: StripSender? = nil
-var stripLastSend = 0.0, stripLastColors: [UInt8] = []
+var stripLastSend = 0.0, stripLastColors: [UInt8] = [], stripShown: Status? = nil
 let stripStatusColors = StatusColors(working: cfg.working, done: cfg.done, attention: cfg.attention, badge: cfg.badgeColor)
-let stripFps = 10.0   // the tick rate
 
 /// Runs on its own 100 ms timer, not from tick(): a full-board keyboard frame blocks tick() for up
 /// to a second, and the keyboard code pumps the run loop between reports, so this timer keeps
 /// firing while the keyboard is busy.
 func renderStrip(_ pic: Picture) {
     guard let s = strip else { return }
-    let colors = stripColors(pic, s.cfg, stripStatusColors, floor: cfg.pulseFloor, fps: stripFps)
+    let colors = stripColors(pic, s.cfg, stripStatusColors, floor: cfg.pulseFloor, fps: s.cfg.fps)
     let flat = colors.flatMap { [$0.0, $0.1, $0.2] }
     let dark = pic.status == .idle && pic.badge == 0
+    let animated = pic.style == "pulse" || pic.style == "blink"
+    if animated, stripShown == pic.status, pic.t - stripLastSend < 1.0 / s.cfg.fps { return }   // pace pulse frames at the strip's fps
     guard shouldSendStrip(changed: flat != stripLastColors, dark: dark, elapsed: pic.t - stripLastSend, keepAlive: s.cfg.keepAliveSeconds) else { return }
     s.send(colors); stripLastSend = pic.t; stripLastColors = flat
+    if stripShown != pic.status { stripShown = pic.status; log("strip: \(pic.status)") }
 }
 
 // MARK: - state ----------------------------------------------------------------------------
@@ -752,7 +754,7 @@ case "daemon":
     if let sc = cfg.strip { strip = StripSender(sc) } else if let e = cfg.stripError { log("strip: disabled: \(e)") }
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
     CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
-    let stripTimer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.25, 1.0 / stripFps, 0, 0) { _ in
+    let stripTimer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.25, 0.1, 0, 0) { _ in
         if !stopRequested { renderStrip(currentPicture()) }
     }
     if strip != nil { CFRunLoopAddTimer(CFRunLoopGetMain(), stripTimer, CFRunLoopMode.defaultMode) }
