@@ -159,9 +159,12 @@ none. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's
 `host` is an IP or DNS name; mDNS `.local` names do not cross VLANs, so give the board a DHCP
 reservation. Remove the block to turn the strip off; the keyboard never depends on it.
 
-Board setup, once, in the WLED web page: LED count and type (an RGBW strip: type SK6812 RGBW,
-auto-white "none"), a current limit for USB power, DDP receiver on (default), realtime timeout
-about 2000 ms so the strip goes dark when nothing is sent. Then:
+Board setup, once, in the WLED web page (or its JSON API): LED count and type (an RGBW strip: type
+SK6812 RGBW, auto-white "none"), a current limit for USB power (2500 mA for a 144-LED strip on a
+3 A USB supply), DDP receiver on (default), realtime timeout about 2500 ms (default), and, so that
+idle really is dark: Sync settings → "Force max brightness" for realtime on, then turn the board's
+own output off and make off the boot default (`def.on = false`). Otherwise WLED shows its own
+effect whenever the daemon stops sending. Then:
 
 ```sh
 kbstatus stop; kbstatus strip-test          # red, green, blue sweep + badge pattern, 1 s each
