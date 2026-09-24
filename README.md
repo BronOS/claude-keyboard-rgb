@@ -195,12 +195,15 @@ Typing on any non-AULA keyboard clears the done state too.
   "builtinBlinkHz": 1,
   "builtinFps": 30,
   "builtinLevel": 1.0,
-  "builtinFloor": 0
+  "builtinFloor": 0,
+  "builtinRestoreMin": 0.3
 }
 ```
 
 - `builtinWorkingStyle`: `breathe` | `static` (steady at `builtinLevel`) | `off` (leave the backlight alone while working).
 - `builtinAttentionStyle`: `blink` | `breathe` (at `builtinBlinkHz`).
+- `builtinRestoreMin`: on idle/stop the saved level is handed back, but never below this. An explicitly
+  set level sticks even with auto-brightness on, so restoring a captured 0 left the keyboard dark at night.
 - A breathe period under ~2 s is too subtle: the backlight smooths fast changes, and a linear ramp
   spends most of its time in the bright half where levels look alike. Keep the gamma curve and 3 s.
 - Private API: the daemon looks it up at runtime and logs `built-in backlight: ... not available`
