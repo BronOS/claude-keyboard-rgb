@@ -1,0 +1,18 @@
+{
+  "working":   [0, 90, 255],
+  "done":      [0, 255, 40],
+  "attention": [255, 0, 0],
+  "doneHoldSeconds": 90,
+  "workingTimeoutMinutes": 20,
+  "pulseFloor": 0.25,
+  "attentionStyle": "pulse",
+  "workingStyle": "pulse",
+  "strip": {
+    "host": "10.0.30.15",
+    "leds": 144,
+    "statusRange": [0, 143],
+    "brightness": 0.6,
+    "fps": 10,
+    "keepAliveSeconds": 1.0
+  }
+}

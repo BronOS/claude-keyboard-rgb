@@ -79,6 +79,7 @@ struct UserConfig {
     var builtinFps = 30.0
     var builtinLevel = 1.0                // brightness for done / static working (0..1)
     var builtinFloor = 0.0                // breathe dims to this (0 = fully off at the trough)
+    var builtinRestoreMin = 0.3           // never hand back a darker level than this (a captured 0 would stick, even with auto on)
 
     static func load() -> UserConfig {
         var c = UserConfig()
@@ -126,6 +127,7 @@ struct UserConfig {
         if let v = j["builtinFps"] as? Double { c.builtinFps = max(2, min(60, v)) }
         if let v = j["builtinLevel"] as? Double { c.builtinLevel = max(0, min(1, v)) }
         if let v = j["builtinFloor"] as? Double { c.builtinFloor = max(0, min(1, v)) }
+        if let v = j["builtinRestoreMin"] as? Double { c.builtinRestoreMin = max(0, min(1, v)) }
         return c
     }
     var effectiveWorkingStyle: String { workingStyle ?? (productID == 0xFA08 ? "static" : "pulse") }
@@ -458,9 +460,11 @@ final class Backlight {
         let f = Float(max(0, min(1, v))); if abs(f - lastLevel) < 0.003 { return }
         lastLevel = f; _ = setF(c, sSet, f, id)
     }
+    /// An explicitly set level sticks even with auto-brightness on, so a captured 0 (auto in daylight, or an
+    /// earlier restore) would leave the keyboard dark all night: restore no lower than builtinRestoreMin.
     func restore() {
         guard let o = original else { return }
-        _ = setF(c, sSet, o.level, id); _ = setB(c, sSetA, o.auto, id); original = nil; lastLevel = -1
+        _ = setF(c, sSet, max(o.level, Float(cfg.builtinRestoreMin)), id); _ = setB(c, sSetA, o.auto, id); original = nil; lastLevel = -1
     }
 }
 var backlight: Backlight? = nil
