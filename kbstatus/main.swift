@@ -68,6 +68,7 @@ struct UserConfig {
     var badgePollSeconds = 2.0
     var agtermctlPath = "/opt/homebrew/bin/agtermctl"
     var vendorID = 0x3554, productID = 0xFA07
+    var keyboard = true                   // drive the AULA board's LEDs; false = never open it (its keystrokes still clear "done")
     var strip: StripConfig? = nil         // the "strip" block (WLED over DDP); nil = no strip output
     var stripError: String? = nil         // why the strip block was rejected, if it was
     var builtinBacklight = false          // also drive the MacBook's built-in keyboard backlight (private CoreBrightness API)
@@ -107,6 +108,7 @@ struct UserConfig {
         if let v = j["overlayRefreshSeconds"] as? Double { c.overlayRefreshSeconds = max(0.5, v) }
         if let v = j["streamGapMs"] as? Double { c.streamGapMs = v }
         if let v = j["productID"] as? Int { c.productID = v }
+        if let v = j["keyboard"] as? Bool { c.keyboard = v }
         if let v = j["agtermBadge"] as? Bool { c.agtermBadge = v }
         if let k = j["badgeKeys"] as? [String] { c.badgeKeys = k.map { $0.lowercased() } }
         c.badgeColor = rgb("badgeColor") ?? c.badgeColor
@@ -641,7 +643,7 @@ func handle(_ line: String) {
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\nstrip: \(strip.map { "\($0.cfg.host) (\($0.target)) \($0.cfg.leds) LEDs, \($0.packets) packets, last \(stripLastSend > 0 ? String(format: "%.1f s ago", CFAbsoluteTimeGetCurrent() - stripLastSend) : "never")" } ?? (cfg.stripError.map { "disabled: \($0)" } ?? "off"))\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\nbuilt-in backlight: \(backlight == nil ? (cfg.builtinBacklight ? "unavailable" : "off") : (backlightShown?.rawValue ?? "none"))\n"
+    var s = "device: \(!cfg.keyboard ? "off (config)" : device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\nstrip: \(strip.map { "\($0.cfg.host) (\($0.target)) \($0.cfg.leds) LEDs, \($0.packets) packets, last \(stripLastSend > 0 ? String(format: "%.1f s ago", CFAbsoluteTimeGetCurrent() - stripLastSend) : "never")" } ?? (cfg.stripError.map { "disabled: \($0)" } ?? "off"))\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\nbuilt-in backlight: \(backlight == nil ? (cfg.builtinBacklight ? "unavailable" : "off") : (backlightShown?.rawValue ?? "none"))\n"
     for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
 }
@@ -741,7 +743,8 @@ case "stop":
 case "daemon":
     serveSocket()
     log("daemon starting (pid \(getpid())) indicator LEDs: \(indicatorLEDs); solid states paint \(solidLEDs.count) keys (\(overlayFrames(solid((1, 1, 1))).count) reports per frame); attention paints \(attentionLEDs.count) keys at \(String(format: "%.1f", effectiveFps(for: .attention))) fps, pulse \(String(format: "%.2f", pulseHz(for: .attention))) Hz; working paints \(workingLEDs.count) keys, pulse \(String(format: "%.2f", pulseHz(for: .working))) Hz")
-    let mgr = startHIDManager(onArrive: true)
+    let mgr = cfg.keyboard ? startHIDManager(onArrive: true) : nil
+    if !cfg.keyboard { log("keyboard: off (config); its keystrokes are still watched") }
     let typing = startTypingMonitor()
     var builtinTyping: IOHIDManager? = nil
     if cfg.builtinBacklight, let bl = Backlight() {

@@ -159,7 +159,9 @@ LEDs per agterm badge (see below) from its start, painting over the status color
 overlap; LEDs in neither range stay off. Defaults: the whole strip, and no badge range. `leds` is capped at 480 (frames are split into 160-LED packets like WLED's own sender).
 `fps` (1–10) paces pulse frames. `host` is an IP or DNS name; mDNS `.local` names do not cross
 VLANs, so give the board a DHCP reservation. Remove the block to turn the strip off; the keyboard
-never depends on it.
+never depends on it. To drive the strip alone, set `"keyboard": false` at the top level: the daemon
+then never opens the AULA board for output, but still watches its keystrokes so typing clears the
+done state. `kbstatus status` shows `device: off (config)`.
 
 Board setup, once, in the WLED web page (or its JSON API): LED count and type (an RGBW strip: type
 SK6812 RGBW, auto-white "none"), a current limit for USB power (2500 mA for a 144-LED strip on a
