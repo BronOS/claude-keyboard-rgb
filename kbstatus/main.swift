@@ -87,6 +87,10 @@ struct UserConfig {
     var menuBar = false                   // a status dot in the macOS menu bar; its menu lists the sessions
     var menuBarWorkingStyle = "pulse"     // pulse | static
     var menuBarAttentionStyle = "pulse"   // pulse | blink | static
+    var menuBarIcon = "crab"              // crab (Claude Code's mascot) | dot
+    var menuBarWorking: RGB = (215, 119, 87)   // Claude Code's own orange (its theme color for the crab)
+    var menuBarDone: RGB? = nil           // nil = the done color
+    var menuBarAttention: RGB? = nil      // nil = the attention color
 
     static func load() -> UserConfig {
         var c = UserConfig()
@@ -138,6 +142,9 @@ struct UserConfig {
         if let v = j["menuBar"] as? Bool { c.menuBar = v }
         if let v = j["menuBarWorkingStyle"] as? String { c.menuBarWorkingStyle = v }
         if let v = j["menuBarAttentionStyle"] as? String { c.menuBarAttentionStyle = v }
+        if let v = j["menuBarIcon"] as? String { c.menuBarIcon = v }
+        c.menuBarWorking = rgb("menuBarWorking") ?? c.menuBarWorking
+        c.menuBarDone = rgb("menuBarDone"); c.menuBarAttention = rgb("menuBarAttention")
         return c
     }
     var effectiveWorkingStyle: String { workingStyle ?? (productID == 0xFA08 ? "static" : "pulse") }
@@ -663,15 +670,15 @@ func statusText() -> String {
 }
 
 // MARK: - menu bar ----------------------------------------------------------------------------
-// A dot in the macOS menu bar: the composite state in this Mac's colors (working and attention pulse
-// by default, idle is an outline) and a menu listing the sessions. Menu clicks need NSApplication's event loop, so with
+// Claude Code's crab (or a dot) in the macOS menu bar: the composite state in this Mac's colors (working
+// and attention pulse by default, idle in the menu bar's own icon color) and a menu listing the sessions. Menu clicks need NSApplication's event loop, so with
 // the menu bar on the daemon runs NSApp instead of a bare CFRunLoop, and every timer is registered
 // for the common modes: default-mode timers stop while a menu is open.
 
 final class MenuBar: NSObject, NSMenuDelegate {
     private let item: NSStatusItem
-    private var shownStatus: Status? = nil, shownFilled = false, shownAlpha = -1.0
-    private var images: [String: NSImage] = [:]   // per color and fill
+    private var shownStatus: Status? = nil, shownColored = false, shownAlpha = -1.0
+    private var images: [String: NSImage] = [:]   // per color
     private let activity: NSObjectProtocol
 
     override init() {
@@ -686,25 +693,43 @@ final class MenuBar: NSObject, NSMenuDelegate {
     }
     func update() {
         let s = composite()
-        let d = menuDot(s, style: styleFor(s, working: cfg.menuBarWorkingStyle, attention: cfg.menuBarAttentionStyle), t: CFAbsoluteTimeGetCurrent(), floor: cfg.pulseFloor)
-        if s == shownStatus && d.filled == shownFilled && d.alpha == shownAlpha { return }
+        let d = menuIcon(s, style: styleFor(s, working: cfg.menuBarWorkingStyle, attention: cfg.menuBarAttentionStyle), t: CFAbsoluteTimeGetCurrent(), floor: cfg.pulseFloor)
+        if s == shownStatus && d.colored == shownColored && d.alpha == shownAlpha { return }
         // The pulse fades the button, not the image: a new image costs ~5 ms of CPU per frame (11% of a core
         // at 20 fps), an opacity change ~0.2% in all.
         item.button?.alphaValue = CGFloat(d.alpha); shownAlpha = d.alpha
-        if s == shownStatus && d.filled == shownFilled { return }
+        if s == shownStatus && d.colored == shownColored { return }
         if s != shownStatus { item.button?.toolTip = "Claude: \(s.rawValue)" }
-        shownStatus = s; shownFilled = d.filled
-        let c = color(for: s), key = "\(c.map { "\($0.0),\($0.1),\($0.2)" } ?? "idle") \(d.filled)"
-        if images[key] == nil { images[key] = MenuBar.dot(c, filled: d.filled, size: 18, diameter: 10) }
+        shownStatus = s; shownColored = d.colored
+        let c = d.colored ? MenuBar.color(for: s) : nil, key = c.map { "\($0.0),\($0.1),\($0.2)" } ?? "plain"
+        if images[key] == nil { images[key] = MenuBar.icon(c) }
         item.button?.image = images[key]
     }
-    /// A circle in `c`, filled or as an outline; nil = a template outline that follows the menu bar's appearance.
-    static func dot(_ c: RGB?, filled: Bool, size: CGFloat, diameter: CGFloat) -> NSImage {
-        let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { r in
-            let p = NSBezierPath(ovalIn: r.insetBy(dx: (size - diameter) / 2, dy: (size - diameter) / 2))
-            let col = c.map { NSColor(srgbRed: CGFloat($0.0) / 255, green: CGFloat($0.1) / 255, blue: CGFloat($0.2) / 255, alpha: 1) } ?? .black
-            if filled { col.setFill(); p.fill() } else { col.setStroke(); p.lineWidth = 1.5; p.stroke() }
-            return true
+    /// Menu bar colors: working is Claude's orange unless configured; done and attention follow the other outputs.
+    static func color(for s: Status) -> RGB? {
+        switch s { case .working: return cfg.menuBarWorking; case .done: return cfg.menuBarDone ?? cfg.done; case .attention: return cfg.menuBarAttention ?? cfg.attention; case .idle: return nil }
+    }
+    /// The crab (or the dot, "menuBarIcon": "dot") in `c`; nil = a template image, drawn in the menu bar's own
+    /// icon color (a dot then becomes an outline). `small` is the size for menu rows (only the dot shrinks).
+    static func icon(_ c: RGB?, small: Bool = false) -> NSImage {
+        let col = c.map { NSColor(srgbRed: CGFloat($0.0) / 255, green: CGFloat($0.1) / 255, blue: CGFloat($0.2) / 255, alpha: 1) } ?? .black
+        let img: NSImage
+        if cfg.menuBarIcon == "dot" {
+            let size: CGFloat = small ? 12 : 18, diameter: CGFloat = small ? 9 : 10
+            img = NSImage(size: NSSize(width: size, height: size), flipped: false) { r in
+                let p = NSBezierPath(ovalIn: r.insetBy(dx: (size - diameter) / 2, dy: (size - diameter) / 2))
+                if c != nil { col.setFill(); p.fill() } else { col.setStroke(); p.lineWidth = 1.5; p.stroke() }
+                return true
+            }
+        } else {
+            img = NSImage(size: NSSize(width: CGFloat(crabPixels[0].count), height: CGFloat(crabPixels.count * 2)), flipped: true) { _ in
+                let p = NSBezierPath()
+                for (y, row) in crabPixels.enumerated() {
+                    for (x, ch) in row.enumerated() where ch == "#" { p.appendRect(NSRect(x: CGFloat(x), y: CGFloat(y * 2), width: 1, height: 2)) }
+                }
+                col.setFill(); p.fill()
+                return true
+            }
         }
         img.isTemplate = c == nil
         return img
@@ -715,7 +740,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
         if rows.isEmpty { menu.addItem(entry("No active sessions", nil, enabled: false)) }
         for r in rows {
             let i = entry(r.text, #selector(clearSession(_:)), tip: "Click to clear (its next hook sets it again)")
-            i.representedObject = r.id; i.image = MenuBar.dot(color(for: r.status), filled: true, size: 12, diameter: 9)
+            i.representedObject = r.id; i.image = MenuBar.icon(MenuBar.color(for: r.status), small: true)
             menu.addItem(i)
         }
         menu.addItem(.separator())
@@ -746,7 +771,7 @@ func startMenuBar() {
     let mb = MenuBar(); menuBar = mb; menuBarState = "on"
     let t = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.1, 1.0 / 20, 0, 0) { _ in if !stopRequested { mb.update() } }   // 20 fps: smooth enough for a 2 Hz pulse
     CFRunLoopAddTimer(CFRunLoopGetMain(), t, CFRunLoopMode.commonModes)
-    log("menu bar: on (working \(cfg.menuBarWorkingStyle), attention \(cfg.menuBarAttentionStyle))")
+    log("menu bar: on (\(cfg.menuBarIcon), working \(cfg.menuBarWorkingStyle), attention \(cfg.menuBarAttentionStyle))")
 }
 /// Ends the daemon's main loop: CFRunLoopRun() stops at once; NSApp.run() only notices stop() after the next event.
 func stopMainLoop() {

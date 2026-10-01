@@ -93,11 +93,22 @@ let nominalPulseHz: [Status: Double] = [.attention: 2.0, .working: 0.8]
 
 // MARK: - menu bar ----------------------------------------------------------------------------
 
-/// The menu bar dot at time t: filled or an outline, and its opacity. `style` as on the keyboard: pulse
-/// fades the opacity between `floor` and 1 at the state's nominal rate (in phase with the strip), blink
-/// alternates filled and outline at 1 Hz, static stays filled. Idle is always an outline. The opacity
-/// is rounded to 1/20 steps, so frames within a step change nothing on screen.
-func menuDot(_ s: Status, style: String, t: Double, floor: Double) -> (filled: Bool, alpha: Double) {
+/// Claude Code's crab as its welcome banner draws it in quadrant blocks (" ▐▛███▜▌" / "▝▜█████▛▘" /
+/// "  ▘▘ ▝▝"), one character per quadrant. A quadrant is twice as tall as wide, so each row is drawn 2 pt tall.
+let crabPixels = [
+    "   ############   ",
+    "   ## ###### ##   ",
+    " ################ ",
+    "   ############   ",
+    "    # #    # #    ",
+]
+
+/// The menu bar icon at time t: in the state color or plain (the menu bar's own icon color), and its
+/// opacity. `style` as on the keyboard: pulse fades the opacity between `floor` and 1 at the state's
+/// nominal rate (in phase with the strip), blink alternates colored and plain at 1 Hz, static stays
+/// colored. Idle is always plain. The opacity is rounded to 1/20 steps, so frames within a step change
+/// nothing on screen.
+func menuIcon(_ s: Status, style: String, t: Double, floor: Double) -> (colored: Bool, alpha: Double) {
     if s == .idle { return (false, 1) }
     switch style {
     case "pulse": return (true, (pulseLevel(t: t, hz: nominalPulseHz[s] ?? 0.8, floor: floor) * 20).rounded() / 20)

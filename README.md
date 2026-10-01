@@ -8,7 +8,7 @@ orange when it is waiting for a permission decision.
 
 | Path | Purpose |
 |------|---------|
-| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID + optional built-in backlight and menu bar dot, no dependencies) |
+| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID + optional built-in backlight and menu bar icon, no dependencies) |
 | `kbstatus/core.swift` | pure protocol code shared by the daemon and the tests (frames, key map, state types) |
 | `kbstatus/tests/main.swift`, `kbstatus/test.sh` | assert-based tests: `kbstatus/test.sh` builds and runs them |
 | `kbstrip/kbstrip.py`, `kbstrip/install.sh` | Linux: strip-only daemon + hook client (Python, standard library), same config block and DDP frames |
@@ -291,20 +291,24 @@ Test without the board: `probe/ddp-fake.py --leds 144` on the same machine with
 }
 ```
 
-## Menu bar dot (optional)
+## Menu bar icon (optional)
 
-`"menuBar": true` puts a dot in the macOS menu bar in the `working`, `done` or `attention` color, and an
-outline when idle. Working and attention pulse like the strip (0.8 Hz and 2 Hz, down to `pulseFloor`);
-`"menuBarWorkingStyle": "static"` and `"menuBarAttentionStyle": "blink"` or `"static"` calm it down.
-The pulse fades the item's opacity, which keeps the daemon near 1% CPU; redrawing the dot for every
-frame cost about 10%. Its menu lists the sessions as `<project> —
-<state> <age>` (attention first; the project is the folder the session runs in). Clicking a session
+`"menuBar": true` puts Claude Code's crab in the macOS menu bar (decoded from the block characters of
+its welcome banner): Claude's orange while working, the `done` or `attention` color otherwise, and
+the menu bar's own icon color when idle. `menuBarWorking`, `menuBarDone` and `menuBarAttention`
+(`[r, g, b]`) override the menu bar colors alone; the default working orange is `[215, 119, 87]`,
+the color Claude Code draws the crab in. `"menuBarIcon": "dot"` shows a dot instead (an outline when idle). Working and
+attention pulse like the strip (0.8 Hz and 2 Hz, down to `pulseFloor`); `"menuBarWorkingStyle":
+"static"` and `"menuBarAttentionStyle": "blink"` or `"static"` calm it down. The pulse fades the
+item's opacity, which keeps the daemon near 1% CPU; redrawing the icon for every frame cost about
+10%. Its menu lists the sessions as `<project> — <state> <age>` (attention first; the project is
+the folder the session runs in). Clicking a session
 clears it, for one left behind by a crashed terminal. The menu also has **Clear all sessions**,
 **Open log** and **Stop daemon** (the next hook starts it again). Set it back to `false` (and
 `kbstatus stop`) to remove it.
 
-- The dot appears with the daemon, at the first hook, and goes away when the daemon stops.
-- macOS adds a new item left of the existing ones. When the bar right of the notch is full, the dot
+- The icon appears with the daemon, at the first hook, and goes away when the daemon stops.
+- macOS adds a new item left of the existing ones. When the bar right of the notch is full, the icon
   lands left of the notch, where a long app menu covers it, and can move on each daemon restart.
   Cmd-drag it into the right side once; the position is kept across restarts.
 - With the menu bar on, the daemon runs as a menu bar app (no Dock icon) instead of a bare run loop,

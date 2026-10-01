@@ -226,15 +226,20 @@ do {
 
 // MARK: menu bar
 do {
-    func dot(_ s: Status, _ style: String, _ t: Double) -> (filled: Bool, alpha: Double) { menuDot(s, style: style, t: t, floor: 0.25) }
-    check(!dot(.idle, "pulse", 0.2).filled && dot(.idle, "pulse", 0.2).alpha == 1, "idle is an opaque outline, whatever the style")
-    check(dot(.done, "static", 0.7) == (true, 1) && dot(.working, "static", 0.3) == (true, 1), "static: filled, opaque")
-    check(dot(.attention, "blink", 10.2) == (true, 1) && !dot(.attention, "blink", 10.7).filled, "blink at 1 Hz: filled in the first half second, outline in the second")
+    func dot(_ s: Status, _ style: String, _ t: Double) -> (colored: Bool, alpha: Double) { menuIcon(s, style: style, t: t, floor: 0.25) }
+    check(!dot(.idle, "pulse", 0.2).colored && dot(.idle, "pulse", 0.2).alpha == 1, "idle is plain and opaque, whatever the style")
+    check(dot(.done, "static", 0.7) == (true, 1) && dot(.working, "static", 0.3) == (true, 1), "static: colored, opaque")
+    check(dot(.attention, "blink", 10.2) == (true, 1) && !dot(.attention, "blink", 10.7).colored, "blink at 1 Hz: colored in the first half second, plain in the second")
     check(dot(.attention, "pulse", 0) == (true, 0.25) && dot(.attention, "pulse", 0.25) == (true, 1), "attention pulses 2 Hz: floor at t=0, full at a quarter second")
     check(dot(.working, "pulse", 0) == (true, 0.25) && dot(.working, "pulse", 0.625) == (true, 1), "working pulses 0.8 Hz: full at half a period")
     var stepped = true
     for i in 0..<500 { let a = dot(.working, "pulse", Double(i) * 0.0173).alpha; if a < 0.25 || a > 1 || abs(a * 20 - (a * 20).rounded()) > 1e-9 { stepped = false } }
     check(stepped, "pulse opacity stays in [floor, 1] on 1/20 steps")
+
+    check(crabPixels.count == 5 && crabPixels.allSatisfy { $0.count == 18 }, "crab grid is 18 x 5")
+    check(crabPixels.allSatisfy { String($0.reversed()) == $0 }, "crab is mirror-symmetric")
+    check(crabPixels.allSatisfy { $0.allSatisfy { $0 == "#" || $0 == " " } }, "crab grid holds only # and space")
+    check(Array(crabPixels[1])[5] == " " && Array(crabPixels[1])[12] == " " && Array(crabPixels[0])[5] == "#", "eyes are holes in the second row")
 
     check(ageText(0) == "0s" && ageText(59.9) == "59s", "under a minute in seconds")
     check(ageText(60) == "1m" && ageText(3599) == "59m", "under an hour in minutes")
