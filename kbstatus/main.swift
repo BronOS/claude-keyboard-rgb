@@ -15,9 +15,13 @@
 // Optional second backend ("builtinBacklight"): the MacBook's own white keyboard backlight via the
 // private CoreBrightness KeyboardBrightnessClient. No color, so states differ by rhythm: working
 // breathes, attention blinks, done is steady bright; idle restores the user's level + auto-brightness.
+//
+// Optional menu bar dot ("menuBar"): the composite state in the configured colors, with the session list
+// in its menu. The daemon then runs NSApplication's event loop instead of a bare CFRunLoop.
 
 import Foundation
 import IOKit.hid
+import AppKit
 
 // MARK: - paths / config -------------------------------------------------------------------
 
@@ -80,6 +84,9 @@ struct UserConfig {
     var builtinLevel = 1.0                // brightness for done / static working (0..1)
     var builtinFloor = 0.0                // breathe dims to this (0 = fully off at the trough)
     var builtinRestoreMin = 0.3           // never hand back a darker level than this (a captured 0 would stick, even with auto on)
+    var menuBar = false                   // a status dot in the macOS menu bar; its menu lists the sessions
+    var menuBarWorkingStyle = "pulse"     // pulse | static
+    var menuBarAttentionStyle = "pulse"   // pulse | blink | static
 
     static func load() -> UserConfig {
         var c = UserConfig()
@@ -128,6 +135,9 @@ struct UserConfig {
         if let v = j["builtinLevel"] as? Double { c.builtinLevel = max(0, min(1, v)) }
         if let v = j["builtinFloor"] as? Double { c.builtinFloor = max(0, min(1, v)) }
         if let v = j["builtinRestoreMin"] as? Double { c.builtinRestoreMin = max(0, min(1, v)) }
+        if let v = j["menuBar"] as? Bool { c.menuBar = v }
+        if let v = j["menuBarWorkingStyle"] as? String { c.menuBarWorkingStyle = v }
+        if let v = j["menuBarAttentionStyle"] as? String { c.menuBarAttentionStyle = v }
         return c
     }
     var effectiveWorkingStyle: String { workingStyle ?? (productID == 0xFA08 ? "static" : "pulse") }
@@ -589,7 +599,7 @@ func writeOverlay(_ leds: [(UInt8, RGB)]) -> Bool {
 func tick() {
     stateLock.lock(); let cmds = pendingCommands; pendingCommands.removeAll(); stateLock.unlock()
     for c in cmds { handle(c) }
-    if stopRequested { CFRunLoopStop(CFRunLoopGetMain()); return }
+    if stopRequested { stopMainLoop(); return }
     if device != nil, !linkAsleep(), ensurePerKeyMode() { renderKeyboard(currentPicture()) }
 }
 /// Keyboard renderer: paints the picture with 0x88 overlays (see the design note at the top of the file).
@@ -633,23 +643,117 @@ func renderKeyboard(_ pic: Picture) {
 
 func handle(_ line: String) {
     if line == "REMAP" { backgroundApplied = false; return }   // diagnostics: force the background map again
-    let parts = line.split(separator: " ").map(String.init)
+    let parts = line.split(separator: " ", maxSplits: 3).map(String.init)   // SET <sid> <verb> [project name, may contain spaces]
     guard parts.count >= 2, parts[0] == "SET" else { return }
-    let sid = parts[1], verb = parts.count > 2 ? parts[2] : ""
+    let sid = parts[1], verb = parts.count > 2 ? parts[2] : "", name = parts.count > 3 ? parts[3] : nil
     if verb == "end" { sessions[sid] = nil; log("session \(sid) ended"); return }
     if let s = Status(rawValue: verb) {
         if s == .idle { sessions[sid] = nil } else {
             // keep the original timestamp while status is unchanged (working pings shouldn't reset "since" for timeout... they should refresh it)
-            sessions[sid] = SessionState(status: s, since: Date())
+            sessions[sid] = SessionState(status: s, since: Date(), name: name ?? sessions[sid]?.name)
         }
         log("session \(sid) -> \(s)")
     }
 }
 func statusText() -> String {
     stateLock.lock(); defer { stateLock.unlock() }
-    var s = "device: \(!cfg.keyboard ? "off (config)" : device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\nstrip: \(strip.map { "\($0.cfg.host) (\($0.target)) \($0.cfg.leds) LEDs, \($0.packets) packets, last \(stripLastSend > 0 ? String(format: "%.1f s ago", CFAbsoluteTimeGetCurrent() - stripLastSend) : "never")" } ?? (cfg.stripError.map { "disabled: \($0)" } ?? "off"))\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\nbuilt-in backlight: \(backlight == nil ? (cfg.builtinBacklight ? "unavailable" : "off") : (backlightShown?.rawValue ?? "none"))\n"
-    for (id, st) in sessions { s += "  \(id) \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
+    var s = "device: \(!cfg.keyboard ? "off (config)" : device == nil ? "absent" : "present")\ncomposite: \(composite().rawValue)\nshown: \(appliedStatus?.rawValue ?? "none")\nbackground map: \(backgroundApplied ? "applied" : "pending")\nworking style: \(cfg.effectiveWorkingStyle)\nagterm badges: \(cfg.agtermBadge ? "\(badgeCount)" : "off")\nstrip: \(strip.map { "\($0.cfg.host) (\($0.target)) \($0.cfg.leds) LEDs, \($0.packets) packets, last \(stripLastSend > 0 ? String(format: "%.1f s ago", CFAbsoluteTimeGetCurrent() - stripLastSend) : "never")" } ?? (cfg.stripError.map { "disabled: \($0)" } ?? "off"))\ntyping: \(typingActive() ? "active (writes held)" : "quiet")\nbuilt-in backlight: \(backlight == nil ? (cfg.builtinBacklight ? "unavailable" : "off") : (backlightShown?.rawValue ?? "none"))\nmenu bar: \(menuBarState)\n"
+    for (id, st) in sessions { s += "  \(id)\(st.name.map { " (\($0))" } ?? "") \(st.status.rawValue) since \(Int(Date().timeIntervalSince(st.since)))s\n" }
     return s
+}
+
+// MARK: - menu bar ----------------------------------------------------------------------------
+// A dot in the macOS menu bar: the composite state in this Mac's colors (working and attention pulse
+// by default, idle is an outline) and a menu listing the sessions. Menu clicks need NSApplication's event loop, so with
+// the menu bar on the daemon runs NSApp instead of a bare CFRunLoop, and every timer is registered
+// for the common modes: default-mode timers stop while a menu is open.
+
+final class MenuBar: NSObject, NSMenuDelegate {
+    private let item: NSStatusItem
+    private var shownStatus: Status? = nil, shownFilled = false, shownAlpha = -1.0
+    private var images: [String: NSImage] = [:]   // per color and fill
+    private let activity: NSObjectProtocol
+
+    override init() {
+        // an NSApplication without windows can be put in App Nap, which would throttle the pulse timers
+        activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "kbstatus animates the status outputs")
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        super.init()
+        item.autosaveName = "kbstatus"   // a Cmd-dragged position survives daemon restarts (a full bar puts a new item left of the notch)
+        let menu = NSMenu(); menu.autoenablesItems = false; menu.delegate = self
+        item.menu = menu
+        update()
+    }
+    func update() {
+        let s = composite()
+        let d = menuDot(s, style: styleFor(s, working: cfg.menuBarWorkingStyle, attention: cfg.menuBarAttentionStyle), t: CFAbsoluteTimeGetCurrent(), floor: cfg.pulseFloor)
+        if s == shownStatus && d.filled == shownFilled && d.alpha == shownAlpha { return }
+        // The pulse fades the button, not the image: a new image costs ~5 ms of CPU per frame (11% of a core
+        // at 20 fps), an opacity change ~0.2% in all.
+        item.button?.alphaValue = CGFloat(d.alpha); shownAlpha = d.alpha
+        if s == shownStatus && d.filled == shownFilled { return }
+        if s != shownStatus { item.button?.toolTip = "Claude: \(s.rawValue)" }
+        shownStatus = s; shownFilled = d.filled
+        let c = color(for: s), key = "\(c.map { "\($0.0),\($0.1),\($0.2)" } ?? "idle") \(d.filled)"
+        if images[key] == nil { images[key] = MenuBar.dot(c, filled: d.filled, size: 18, diameter: 10) }
+        item.button?.image = images[key]
+    }
+    /// A circle in `c`, filled or as an outline; nil = a template outline that follows the menu bar's appearance.
+    static func dot(_ c: RGB?, filled: Bool, size: CGFloat, diameter: CGFloat) -> NSImage {
+        let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { r in
+            let p = NSBezierPath(ovalIn: r.insetBy(dx: (size - diameter) / 2, dy: (size - diameter) / 2))
+            let col = c.map { NSColor(srgbRed: CGFloat($0.0) / 255, green: CGFloat($0.1) / 255, blue: CGFloat($0.2) / 255, alpha: 1) } ?? .black
+            if filled { col.setFill(); p.fill() } else { col.setStroke(); p.lineWidth = 1.5; p.stroke() }
+            return true
+        }
+        img.isTemplate = c == nil
+        return img
+    }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let rows = menuRows(sessions, now: Date())
+        if rows.isEmpty { menu.addItem(entry("No active sessions", nil, enabled: false)) }
+        for r in rows {
+            let i = entry(r.text, #selector(clearSession(_:)), tip: "Click to clear (its next hook sets it again)")
+            i.representedObject = r.id; i.image = MenuBar.dot(color(for: r.status), filled: true, size: 12, diameter: 9)
+            menu.addItem(i)
+        }
+        menu.addItem(.separator())
+        menu.addItem(entry("Clear all sessions", #selector(clearAll), enabled: !rows.isEmpty))
+        menu.addItem(entry("Open log", #selector(openLog)))
+        menu.addItem(entry("Stop daemon", #selector(stopDaemon), tip: "All outputs go dark; the next Claude hook starts it again"))
+    }
+    private func entry(_ title: String, _ action: Selector?, enabled: Bool = true, tip: String? = nil) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        i.target = self; i.isEnabled = enabled; i.toolTip = tip
+        return i
+    }
+    @objc func clearSession(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        sessions[id] = nil; log("session \(id) cleared from the menu bar")
+    }
+    @objc func clearAll() { log("all \(sessions.count) session(s) cleared from the menu bar"); sessions.removeAll() }
+    @objc func openLog() { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) }
+    @objc func stopDaemon() { log("stop requested from the menu bar"); stateLock.lock(); stopRequested = true; stateLock.unlock() }
+}
+var menuBar: MenuBar? = nil
+var menuBarState = "off"
+func startMenuBar() {
+    guard cfg.menuBar else { return }
+    // a daemon started from an ssh session has no window server to draw in
+    guard CGSessionCopyCurrentDictionary() != nil else { menuBarState = "off (no GUI session)"; log("menu bar: no GUI session; off"); return }
+    NSApplication.shared.setActivationPolicy(.accessory)
+    let mb = MenuBar(); menuBar = mb; menuBarState = "on"
+    let t = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.1, 1.0 / 20, 0, 0) { _ in if !stopRequested { mb.update() } }   // 20 fps: smooth enough for a 2 Hz pulse
+    CFRunLoopAddTimer(CFRunLoopGetMain(), t, CFRunLoopMode.commonModes)
+    log("menu bar: on (working \(cfg.menuBarWorkingStyle), attention \(cfg.menuBarAttentionStyle))")
+}
+/// Ends the daemon's main loop: CFRunLoopRun() stops at once; NSApp.run() only notices stop() after the next event.
+func stopMainLoop() {
+    CFRunLoopStop(CFRunLoopGetMain())
+    guard menuBar != nil else { return }
+    NSApp.stop(nil)
+    if let e = NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0) { NSApp.postEvent(e, atStart: true) }
 }
 
 // MARK: - unix socket ----------------------------------------------------------------------
@@ -717,19 +821,25 @@ func spawnDaemon() {
 let args = Array(CommandLine.arguments.dropFirst())
 let verb = args.first ?? "help"
 
-func sessionID() -> String {
-    if let i = args.firstIndex(of: "--session"), i + 1 < args.count { return args[i + 1] }
+/// Session id and project name (the last component of the hook's cwd, for the menu bar) from the hook
+/// JSON on stdin, or --session ID.
+func hookSession() -> (id: String, name: String?) {
+    if let i = args.firstIndex(of: "--session"), i + 1 < args.count { return (args[i + 1], nil) }
     if isatty(0) == 0 {
         let data = FileHandle.standardInput.readDataToEndOfFile()
-        if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let s = j["session_id"] as? String { return String(s.prefix(36)) }
+        if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let s = j["session_id"] as? String {
+            let name = (j["cwd"] as? String).map { String(URL(fileURLWithPath: $0).lastPathComponent.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(64)) }
+            return (String(s.prefix(36)), name?.isEmpty == false ? name : nil)
+        }
     }
-    return "manual"
+    return ("manual", nil)
 }
 
 switch verb {
 case "working", "done", "attention", "idle", "end":
     if FileManager.default.fileExists(atPath: cacheDir + "/paused") { exit(0) }   // `kbstatus pause` / `resume`
-    let line = "SET \(sessionID()) \(verb)"
+    let hs = hookSession()
+    let line = "SET \(hs.id) \(verb)" + (hs.name.map { " \($0)" } ?? "")
     if clientSend(line) == nil {
         spawnDaemon()
         var ok = false
@@ -755,17 +865,18 @@ case "daemon":
         backlight = bl; builtinTyping = startBuiltinTypingMonitor()
         log("built-in backlight: on (level \(String(format: "%.2f", bl.level)), auto \(bl.auto)); working \(cfg.builtinWorkingStyle) \(cfg.builtinBreatheSeconds) s, attention \(cfg.builtinAttentionStyle) \(cfg.builtinBlinkHz) Hz, \(Int(cfg.builtinFps)) fps")
         let bt = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 1 / cfg.builtinFps, 0, 0) { _ in backlightTick() }
-        CFRunLoopAddTimer(CFRunLoopGetMain(), bt, CFRunLoopMode.defaultMode)
+        CFRunLoopAddTimer(CFRunLoopGetMain(), bt, CFRunLoopMode.commonModes)
     }
     startBadgePoller()
     if let sc = cfg.strip { strip = StripSender(sc) } else if let e = cfg.stripError { log("strip: disabled: \(e)") }
     let timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.1, 0, 0) { _ in tick() }
-    CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.defaultMode)
+    CFRunLoopAddTimer(CFRunLoopGetMain(), timer, CFRunLoopMode.commonModes)   // common: default-mode timers stop while the menu bar menu is open
     let stripTimer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.25, 0.1, 0, 0) { _ in
         if !stopRequested { renderStrip(currentPicture()) }
     }
-    if strip != nil { CFRunLoopAddTimer(CFRunLoopGetMain(), stripTimer, CFRunLoopMode.defaultMode) }
-    CFRunLoopRun()
+    if strip != nil { CFRunLoopAddTimer(CFRunLoopGetMain(), stripTimer, CFRunLoopMode.commonModes) }
+    startMenuBar()
+    if menuBar != nil { NSApplication.shared.run() } else { CFRunLoopRun() }
     // stopping: leave the board in idle colors and hand the built-in backlight back to the user
     if device != nil { _ = sendAll(overlayFrames([])) }   // keys fall back to the black map
     strip?.send([RGB](repeating: (0, 0, 0), count: cfg.strip?.leds ?? 0))   // strip dark
@@ -828,6 +939,6 @@ default:
       kbstatus read-config                       re-read config fragments from the keyboard
       kbstatus daemon                            run the daemon in the foreground
       kbstatus strip-test [secs]                 sweep colors over the WLED strip (config "strip" block); daemon must be stopped
-    config: \(userConfigPath)   log: \(logPath)   ("builtinBacklight": true also pulses the MacBook's own keyboard backlight)
+    config: \(userConfigPath)   log: \(logPath)   ("builtinBacklight": true also pulses the MacBook's own keyboard backlight, "menuBar": true adds a menu bar dot)
     """)
 }

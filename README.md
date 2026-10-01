@@ -8,7 +8,7 @@ orange when it is waiting for a permission decision.
 
 | Path | Purpose |
 |------|---------|
-| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID + optional built-in backlight, no dependencies) |
+| `kbstatus/main.swift` | daemon + hook client (single binary, IOKit HID + optional built-in backlight and menu bar dot, no dependencies) |
 | `kbstatus/core.swift` | pure protocol code shared by the daemon and the tests (frames, key map, state types) |
 | `kbstatus/tests/main.swift`, `kbstatus/test.sh` | assert-based tests: `kbstatus/test.sh` builds and runs them |
 | `kbstrip/kbstrip.py`, `kbstrip/install.sh` | Linux: strip-only daemon + hook client (Python, standard library), same config block and DDP frames |
@@ -290,6 +290,26 @@ Test without the board: `probe/ddp-fake.py --leds 144` on the same machine with
   }
 }
 ```
+
+## Menu bar dot (optional)
+
+`"menuBar": true` puts a dot in the macOS menu bar in the `working`, `done` or `attention` color, and an
+outline when idle. Working and attention pulse like the strip (0.8 Hz and 2 Hz, down to `pulseFloor`);
+`"menuBarWorkingStyle": "static"` and `"menuBarAttentionStyle": "blink"` or `"static"` calm it down.
+The pulse fades the item's opacity, which keeps the daemon near 1% CPU; redrawing the dot for every
+frame cost about 10%. Its menu lists the sessions as `<project> —
+<state> <age>` (attention first; the project is the folder the session runs in). Clicking a session
+clears it, for one left behind by a crashed terminal. The menu also has **Clear all sessions**,
+**Open log** and **Stop daemon** (the next hook starts it again). Set it back to `false` (and
+`kbstatus stop`) to remove it.
+
+- The dot appears with the daemon, at the first hook, and goes away when the daemon stops.
+- macOS adds a new item left of the existing ones. When the bar right of the notch is full, the dot
+  lands left of the notch, where a long app menu covers it, and can move on each daemon restart.
+  Cmd-drag it into the right side once; the position is kept across restarts.
+- With the menu bar on, the daemon runs as a menu bar app (no Dock icon) instead of a bare run loop,
+  so menu clicks get through. A daemon started over ssh has no menu bar: it logs `menu bar: no GUI
+  session; off` and drives the other outputs as usual.
 
 ## agterm badges on the number row (optional)
 

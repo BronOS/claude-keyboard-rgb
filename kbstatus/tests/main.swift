@@ -224,5 +224,44 @@ do {
     check(shouldSendStrip(changed: false, dark: false, elapsed: 3, keepAlive: 2.5), "keep-alive honours the configured interval")
 }
 
+// MARK: menu bar
+do {
+    func dot(_ s: Status, _ style: String, _ t: Double) -> (filled: Bool, alpha: Double) { menuDot(s, style: style, t: t, floor: 0.25) }
+    check(!dot(.idle, "pulse", 0.2).filled && dot(.idle, "pulse", 0.2).alpha == 1, "idle is an opaque outline, whatever the style")
+    check(dot(.done, "static", 0.7) == (true, 1) && dot(.working, "static", 0.3) == (true, 1), "static: filled, opaque")
+    check(dot(.attention, "blink", 10.2) == (true, 1) && !dot(.attention, "blink", 10.7).filled, "blink at 1 Hz: filled in the first half second, outline in the second")
+    check(dot(.attention, "pulse", 0) == (true, 0.25) && dot(.attention, "pulse", 0.25) == (true, 1), "attention pulses 2 Hz: floor at t=0, full at a quarter second")
+    check(dot(.working, "pulse", 0) == (true, 0.25) && dot(.working, "pulse", 0.625) == (true, 1), "working pulses 0.8 Hz: full at half a period")
+    var stepped = true
+    for i in 0..<500 { let a = dot(.working, "pulse", Double(i) * 0.0173).alpha; if a < 0.25 || a > 1 || abs(a * 20 - (a * 20).rounded()) > 1e-9 { stepped = false } }
+    check(stepped, "pulse opacity stays in [floor, 1] on 1/20 steps")
+
+    check(ageText(0) == "0s" && ageText(59.9) == "59s", "under a minute in seconds")
+    check(ageText(60) == "1m" && ageText(3599) == "59m", "under an hour in minutes")
+    check(ageText(3600) == "1h" && ageText(3600 + 5 * 60) == "1h 5m" && ageText(7200 + 59) == "2h", "hours, minutes shown when there are any")
+    check(ageText(-3) == "0s", "a clock step backwards shows 0s")
+
+    let now = Date(timeIntervalSinceReferenceDate: 1000)
+    func at(_ s: Double) -> Date { Date(timeIntervalSinceReferenceDate: 1000 - s) }
+    let rows = menuRows([
+        "aaaa1111-0000": SessionState(status: .done, since: at(30), name: "web"),
+        "bbbb2222-0000": SessionState(status: .working, since: at(240), name: "claude-keyboard"),
+        "cccc3333-0000": SessionState(status: .attention, since: at(5), name: "api"),
+        "dddd4444-0000": SessionState(status: .working, since: at(600), name: nil),
+    ], now: now)
+    check(rows.map { $0.id } == ["cccc3333-0000", "dddd4444-0000", "bbbb2222-0000", "aaaa1111-0000"], "attention, then working (longest first), then done: \(rows.map { $0.id })")
+    check(rows[0].text == "api — attention 5s", "named row: \(rows[0].text)")
+    check(rows[1].text == "session dddd4444 — working 10m", "unnamed row shows the id prefix: \(rows[1].text)")
+    check(rows[2].text == "claude-keyboard — working 4m" && rows[2].status == .working, "row carries its status: \(rows[2].text)")
+
+    let twins = menuRows([
+        "eeee5555-0000": SessionState(status: .working, since: at(10), name: "web"),
+        "ffff6666-0000": SessionState(status: .working, since: at(20), name: "web"),
+        "9999aaaa-0000": SessionState(status: .done, since: at(20), name: "solo"),
+    ], now: now)
+    check(twins.map { $0.text } == ["web (ffff) — working 20s", "web (eeee) — working 10s", "solo — done 20s"], "same project twice: id prefix appended, unique names untouched: \(twins.map { $0.text })")
+    check(menuRows([:], now: now).isEmpty, "no sessions, no rows")
+}
+
 print("\(checks) checks, \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

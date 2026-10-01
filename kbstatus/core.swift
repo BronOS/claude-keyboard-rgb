@@ -69,7 +69,8 @@ func solidMap(_ c: RGB) -> [RGB] { [RGB](repeating: c, count: 126) }
 // MARK: - state types ----------------------------------------------------------------------
 
 enum Status: String { case idle, working, done, attention }
-struct SessionState { var status: Status; var since: Date }
+/// `name` is the session's project folder (from the hook's cwd), shown in the menu bar; nil from older clients.
+struct SessionState { var status: Status; var since: Date; var name: String? = nil }
 
 // MARK: - picture ----------------------------------------------------------------------------
 
@@ -89,6 +90,47 @@ func pulseLevel(t: Double, hz: Double, floor: Double) -> Double {
 /// A pulse needs at least 4 frames per cycle to look like one (2 Hz sampled at 2 fps is flicker).
 func cappedHz(nominal: Double, fps: Double) -> Double { min(nominal, fps / 4) }
 let nominalPulseHz: [Status: Double] = [.attention: 2.0, .working: 0.8]
+
+// MARK: - menu bar ----------------------------------------------------------------------------
+
+/// The menu bar dot at time t: filled or an outline, and its opacity. `style` as on the keyboard: pulse
+/// fades the opacity between `floor` and 1 at the state's nominal rate (in phase with the strip), blink
+/// alternates filled and outline at 1 Hz, static stays filled. Idle is always an outline. The opacity
+/// is rounded to 1/20 steps, so frames within a step change nothing on screen.
+func menuDot(_ s: Status, style: String, t: Double, floor: Double) -> (filled: Bool, alpha: Double) {
+    if s == .idle { return (false, 1) }
+    switch style {
+    case "pulse": return (true, (pulseLevel(t: t, hz: nominalPulseHz[s] ?? 0.8, floor: floor) * 20).rounded() / 20)
+    case "blink": return (t.truncatingRemainder(dividingBy: 1.0) < 0.5, 1)
+    default: return (true, 1)
+    }
+}
+/// "12s", "4m", "1h 5m": how long a session has been in its state.
+func ageText(_ seconds: Double) -> String {
+    let s = max(0, Int(seconds))
+    if s < 60 { return "\(s)s" }
+    if s < 3600 { return "\(s / 60)m" }
+    return s % 3600 < 60 ? "\(s / 3600)h" : "\(s / 3600)h \(s % 3600 / 60)m"
+}
+struct MenuRow: Equatable { var id: String; var status: Status; var text: String }
+let menuStatusOrder: [Status: Int] = [.attention: 0, .working: 1, .done: 2, .idle: 3]
+/// One menu row per session, "<project> — <state> <age>": attention first, then working, then done,
+/// the longest-waiting first within a state. A session without a name shows its id prefix; sessions
+/// sharing a project name get their id prefix appended so they can be told apart.
+func menuRows(_ sessions: [String: SessionState], now: Date) -> [MenuRow] {
+    var count: [String: Int] = [:]
+    for s in sessions.values { if let n = s.name { count[n, default: 0] += 1 } }
+    let sorted = sessions.sorted { a, b in
+        let ra = menuStatusOrder[a.value.status]!, rb = menuStatusOrder[b.value.status]!
+        if ra != rb { return ra < rb }
+        if a.value.since != b.value.since { return a.value.since < b.value.since }
+        return a.key < b.key
+    }
+    return sorted.map { id, s in
+        let label = s.name.map { count[$0, default: 0] > 1 ? "\($0) (\(id.prefix(4)))" : $0 } ?? "session \(id.prefix(8))"
+        return MenuRow(id: id, status: s.status, text: "\(label) — \(s.status.rawValue) \(ageText(now.timeIntervalSince(s.since)))")
+    }
+}
 
 // MARK: - strip (WLED over DDP) -------------------------------------------------------------
 
